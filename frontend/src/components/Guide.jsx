@@ -3,7 +3,7 @@ import { X } from 'lucide-react'
 
 const STEPS = [
   ['Check the banner', 'On the Overview page the big banner says in words whether anything was reported in the last 15 minutes.'],
-  ['Look at the site map', 'Each outlined shape is a work area. Its colour and label show the latest alert there, and the number on its dot is how many incidents in the last 15 minutes. Click a shape to see only that area.'],
+  ['Check camera zones', 'When connected, the Nicla supplies the actual marked regions. Unmapped incidents stay in a separate list; no camera feed never means the site is safe.'],
   ['Open an incident', 'Click any item in the list to see what happened, where, when, and how sure the camera was.'],
   ['Ask for an AI review', 'On the AI review page, Gemini reads the stored history and points out places where problems repeat.'],
 ]
@@ -15,7 +15,7 @@ const COLOURS = [
 ]
 const WORDS = [
   ['Incident', 'One event the system recorded, such as someone entering a restricted area.'],
-  ['Zone', 'A named work area on the site, like "Cutting station A".'],
+  ['Zone', 'A region identified by the edge camera, for example "Nicla Zone 1".'],
   ['Restricted area', 'A zone people should not stand in while work is happening.'],
   ['Simulated', 'A practice incident made by a button or demo. It is not a real detection and is always labelled.'],
   ['Edge report', 'An incident sent by the camera device on site.'],

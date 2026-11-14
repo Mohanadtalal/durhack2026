@@ -22,6 +22,7 @@ from .nicla_geometry import DebouncedOccupancy
 from .nicla_recording import TimedFrameRecorder
 from .nicla_motion import PredictiveMotionMonitor
 from .nicla_usb import NiclaProtocolError, NiclaUSB
+from .preview_server import PreviewServer, zones_for_editor
 from .zone_editor import DEFAULT_ZONE_FILE, ZoneEditor, person_in_polygon
 from .zone_rules import ZoneMonitor
 
@@ -30,7 +31,7 @@ def run(port, preview_only=False, no_api=False, dwell=8.0, weights="yolov8n.pt",
         zone_file=DEFAULT_ZONE_FILE, ppe_weights=None, proximity_mm=None,
         record_path=None, retry_seconds=2.0, predictive=False, sharp_zone_ids=(),
         motion_debug=False, road_file="data/nicla_road_conflicts.json",
-        road_filter=False):
+        road_filter=False, stream_port=None, stream_host="127.0.0.1"):
     import cv2
     import numpy as np
     from .client import send_event, flush_pending
@@ -86,6 +87,7 @@ def run(port, preview_only=False, no_api=False, dwell=8.0, weights="yolov8n.pt",
     window = "SiteGuardian: Nicla Vision"
     frame_size = [320, 240]
     running = True
+    preview = None
 
     def on_mouse(event, x, y, flags, userdata):
         if event == cv2.EVENT_LBUTTONDOWN:
@@ -134,6 +136,15 @@ def run(port, preview_only=False, no_api=False, dwell=8.0, weights="yolov8n.pt",
         print("[RECORD] Saving annotated demo to", record_path)
 
     try:
+        if stream_port is not None:
+            preview = PreviewServer(stream_host, stream_port)
+            preview.update_zones(zones_for_editor(editor, sharp_zone_ids))
+            host, port_number = preview.address
+            print(f"[STREAM] Local annotated MJPEG http://{host}:{port_number}/stream.mjpg")
+            print(f"[STREAM] Camera and zone status http://{host}:{port_number}/status.json")
+            if stream_host not in ("127.0.0.1", "localhost", "::1"):
+                print("[STREAM WARNING] Non-loopback host: this prototype endpoint has "
+                      "NO authentication; use only on a trusted isolated network.")
         cv2.namedWindow(window, cv2.WINDOW_AUTOSIZE)
         cv2.setMouseCallback(window, on_mouse)
         while running:
@@ -412,6 +423,8 @@ def run(port, preview_only=False, no_api=False, dwell=8.0, weights="yolov8n.pt",
                                 recording = TimedFrameRecorder(writer, fps=10.0)
                             recording.write(frame, at=time.monotonic())
 
+                        if preview is not None:
+                            preview.publish_frame(frame)
                         cv2.imshow(window, frame)
                         key = cv2.waitKey(1) & 0xFF
                         if key in (ord("q"), ord("Q")):
@@ -440,6 +453,9 @@ def run(port, preview_only=False, no_api=False, dwell=8.0, weights="yolov8n.pt",
                                         occupancies.append(DebouncedOccupancy(2))
                                         monitors.append(ZoneMonitor(dwell_seconds=dwell))
                                         print("[ZONE] Saved danger zone", len(editor.zones))
+                                        if preview is not None:
+                                            preview.update_zones(
+                                                zones_for_editor(editor, sharp_zone_ids))
                                     else:
                                         print("[ROAD] Saved road conflict area",
                                               len(road_editor.zones))
@@ -451,6 +467,8 @@ def run(port, preview_only=False, no_api=False, dwell=8.0, weights="yolov8n.pt",
                                 occupancies.clear()
                                 monitors.clear()
                                 print("[ZONE] Cleared danger zones")
+                                if preview is not None:
+                                    preview.update_zones([])
                             except OSError as exc:
                                 print("[ZONE] Clear failed:", exc)
                         elif key in (ord("k"), ord("K")):
@@ -484,6 +502,8 @@ def run(port, preview_only=False, no_api=False, dwell=8.0, weights="yolov8n.pt",
                         running = False
                         break
     finally:
+        if preview is not None:
+            preview.close()
         if recording is not None:
             recording.release()
             print(f"[RECORD] Saved {recording.duration_seconds:.1f}s of video "
@@ -518,12 +538,17 @@ def main():
                         help="Separate, optional vehicle/pedestrian conflict area polygons")
     parser.add_argument("--road-filter", action="store_true",
                         help="Optional marked-road filtering; OFF by default; needs a saved polygon")
+    parser.add_argument("--stream-port", type=int, default=None,
+                        help="Expose annotated MJPEG and configured zones for local dashboard, e.g. 8765")
+    parser.add_argument("--stream-host", default="127.0.0.1",
+                        help="Stream HTTP bind address; default loopback only (no authentication)")
     args = parser.parse_args()
     try:
         run(args.port, args.preview_only, args.no_api, args.dwell, args.weights,
             args.zone_file, args.ppe_weights, args.proximity_mm,
             args.record, args.retry_seconds, args.predictive, args.sharp_zone,
-            args.motion_debug, args.road_file, args.road_filter)
+            args.motion_debug, args.road_file, args.road_filter,
+            args.stream_port, args.stream_host)
     except KeyboardInterrupt:
         print("[EXIT] Interrupted by user")
 

@@ -2,6 +2,7 @@ import React, { useCallback, useMemo, useState } from 'react'
 import { BrainCircuit, HelpCircle, Camera, CheckCircle2, History, LayoutDashboard, Map as MapIcon, Menu, RefreshCcw, ShieldCheck, WifiOff, X } from 'lucide-react'
 import { postEvent, runInsights } from './api'
 import { useIncidents } from './hooks/useIncidents'
+import { useCameraStatus } from './hooks/useCameraStatus'
 import { ACTIVE_WINDOW_MS, WINDOWS, timeAgo } from './config'
 import { CountUp, Panel } from './components/Common'
 import { StatusHero } from './components/StatusHero'
@@ -18,7 +19,7 @@ const VIEWS = [
   { id: 'home', label: 'Home', icon: ShieldCheck },
   { id: 'overview', label: 'Overview', icon: LayoutDashboard, blurb: 'The quick picture: is anything wrong on site right now?' },
   { id: 'camera', label: 'Camera', icon: Camera, blurb: 'The camera view, with the most recent incidents beside it.' },
-  { id: 'zones', label: 'Site map', icon: MapIcon, blurb: 'A plan of the work areas. Click an area to see what happened there.' },
+  { id: 'zones', label: 'Camera zones', icon: MapIcon, blurb: 'Real marked regions from the connected camera; incidents without known polygons are listed separately.' },
   { id: 'history', label: 'History', icon: History, blurb: 'Every recorded incident. Use the menus to narrow the list.' },
   { id: 'insights', label: 'AI review', icon: BrainCircuit, blurb: 'Ask an AI to spot patterns in past incidents. It only suggests, people decide.' },
 ]
@@ -48,6 +49,7 @@ export default function App() {
   }, [dismiss])
 
   const { events, health, error, lastUpdated, now, refresh } = useIncidents(onNew)
+  const { cameraStatus, cameraError } = useCameraStatus()
 
   const filtered = useMemo(() => {
     const w = WINDOWS.find((x) => x.id === filters.window)?.ms ?? Infinity
@@ -59,7 +61,8 @@ export default function App() {
   }, [events, filters, now])
 
   const high = filtered.filter((e) => e.severity === 'high' || e.severity === 'critical').length
-  const activeZones = zoneSummaries(events, now).filter((z) => z.recent > 0).length
+  const activeZones = zoneSummaries(events, now, cameraStatus?.zones || [])
+    .filter((z) => z.recent > 0).length
   const latest = events[0]
 
   async function simulate(kind) {
@@ -127,15 +130,15 @@ export default function App() {
 
         {view === 'overview' && (<>
           <div className="grid two">
-            <Panel tone="blue" title="Site plan" note="Each box is a work area, coloured by its latest alert. Click one to see what happened there.">
-              <SiteMap events={events} now={now} selectedZone={filters.zone} onSelectZone={selectZone} />
+            <Panel tone="blue" title="Camera zones" note="Actual saved camera regions when connected; unmapped incidents remain listed.">
+              <SiteMap events={events} now={now} selectedZone={filters.zone} onSelectZone={selectZone} cameraStatus={cameraStatus} />
             </Panel>
             <Panel tone="violet" title="Latest incidents" note="Newest first. Click one for the full story." action={<button className="icon-btn" onClick={refresh} aria-label="Refresh now"><RefreshCcw size={17} /></button>}>
               <div className="scroll tall"><IncidentList incidents={filtered.slice(0, 6)} now={now} onOpen={setSelected} /></div>
             </Panel>
           </div>
           <div className="grid cam">
-            <Panel tone="teal" title="Camera" note="What the camera on site sees"><CameraFeed latest={events[0]} now={now} /></Panel>
+            <Panel tone="teal" title="Camera" note="What the camera on site sees"><CameraFeed latest={events[0]} now={now} cameraStatus={cameraStatus} cameraError={cameraError} /></Panel>
             <Panel tone="pink" title="AI pattern review" note="Gemini looks for problems that keep repeating"><div className="scroll tall">{insightPanel}</div></Panel>
           </div>
           <details className="sim">
@@ -152,15 +155,15 @@ export default function App() {
 
         {view === 'camera' && (
           <div className="grid cam">
-            <Panel title="Camera" note="What the camera on site sees"><CameraFeed latest={events[0]} now={now} /></Panel>
+            <Panel title="Camera" note="What the camera on site sees"><CameraFeed latest={events[0]} now={now} cameraStatus={cameraStatus} cameraError={cameraError} /></Panel>
             <Panel title="Incidents from the camera" note="Newest first"><div className="scroll tall"><IncidentList incidents={events.slice(0, 20)} now={now} onOpen={setSelected} /></div></Panel>
           </div>
         )}
 
         {view === 'zones' && (
           <div className="grid two">
-            <Panel title="Site plan" note="Click a box to see only that area.">
-              <SiteMap events={events} now={now} selectedZone={filters.zone} onSelectZone={selectZone} />
+            <Panel title="Camera zones" note="Select an actual camera region or an incident-only area.">
+              <SiteMap events={events} now={now} selectedZone={filters.zone} onSelectZone={selectZone} cameraStatus={cameraStatus} />
             </Panel>
             <Panel title={filters.zone === 'all' ? 'Incidents by zone' : 'Incidents in selected zone'}>
               {filters.zone === 'all'

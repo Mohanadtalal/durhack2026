@@ -7,14 +7,8 @@ export const SEVERITY = {
 }
 export const SEVERITY_ORDER = ['critical', 'high', 'warning', 'info']
 
-// Site layout is frontend configuration: zone ids must match the zone_id the edge agent sends.
-// Zones C and D are layout placeholders from the project brief; they simply show "no events".
-export const ZONES = [
-  { id: 'cutting-station-a',  label: 'Cutting station A',  x: 30,  y: 30,  w: 270, h: 150 },
-  { id: 'loading-zone-b',     label: 'Loading zone B',     x: 340, y: 30,  w: 270, h: 150 },
-  { id: 'working-at-height-c',label: 'Working at height C',x: 30,  y: 210, w: 270, h: 130 },
-  { id: 'general-area-d',     label: 'General area D',     x: 340, y: 210, w: 270, h: 130 },
-]
+// Camera polygon IDs are provided by edge/preview_server.py at runtime.
+// A hard-coded map must never present invented work areas as safe.
 
 export const WINDOWS = [
   { id: 'all', label: 'All time', ms: Infinity },

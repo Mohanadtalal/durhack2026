@@ -1,11 +1,11 @@
 import React, { useEffect } from 'react'
 import { X, ImageOff } from 'lucide-react'
 import { SeverityTag, SourceTag, Empty } from './Common'
-import { SEVERITY_ORDER, SEVERITY, WINDOWS, ZONES, friendly, plainTitle, timeAgo } from '../config'
+import { SEVERITY_ORDER, SEVERITY, WINDOWS, friendly, plainTitle, timeAgo } from '../config'
 
 export function Filters({ filters, setFilters, events, shown }) {
   const hazards = [...new Set(events.map((e) => e.hazard_type))]
-  const zones = [...new Set([...ZONES.map((z) => z.id), ...events.map((e) => e.zone_id)])]
+  const zones = [...new Set(events.map((e) => e.zone_id))]
   const set = (k) => (ev) => setFilters({ ...filters, [k]: ev.target.value })
   const active = Object.entries(filters).some(([k, v]) => v !== 'all')
   return (

@@ -565,3 +565,36 @@ main#content{animation:viewin .35s ease-out}
   .sp .sp-ring{animation:spring 1.8s ease-out infinite;transform-box:fill-box;transform-origin:center}
 }
 @keyframes spring{0%{fill-opacity:.45;scale:1}100%{fill-opacity:0;scale:2.6}}
+
+
+/* Phase 1: keep marketing scroll sections from covering their own CTA.
+   A sticky hero + raised walkthrough previously intercepted real clicks. */
+@media (min-width:901px) and (prefers-reduced-motion:no-preference) {
+  .l-top{position:relative;top:auto}
+  .l-top .l-copy{transform:none;opacity:1}
+  .l-top .l-demo{translate:none;scale:1;opacity:1}
+  .l-seq-section{margin-top:0}
+}
+
+/* Phase 1: camera-relative zone geometry, populated by the real edge service.
+   No fake or unmonitored zones are drawn. */
+.site-geometry{display:grid;gap:12px}
+.zone-status{display:flex;justify-content:space-between;gap:8px;align-items:center;border:1px solid var(--line);border-radius:6px;background:#edf1f6;padding:9px 12px;font-size:12px;font-weight:700}
+.zone-status span{font-weight:500}
+.zone-online{border-color:#a7d6c1;background:#eaf8f1;color:#155740}
+.zone-offline{border-color:#ead5aa;background:#fff8e7;color:#7d4b07}
+.camera-zone-map{display:block;width:100%;height:auto;border-radius:8px;overflow:hidden}
+.camera-zone-map g:focus-visible{outline:none;filter:drop-shadow(0 0 5px #fff)}
+.zone-unmapped{background:#eff4fa;border:1px dashed #a7b9cd;border-radius:6px;padding:24px;text-align:center}
+.zone-unmapped b{display:block;color:var(--text)}
+.zone-unmapped p{margin:6px auto 0;color:var(--muted);font-size:13px;line-height:1.5;max-width:60ch}
+.real-zone-list{display:grid;gap:6px}
+.zone-list-row{display:flex;align-items:center;justify-content:space-between;gap:12px;border:1px solid var(--line);background:#fff;border-radius:6px;padding:10px 12px;text-align:left;color:var(--text);font-size:13px}
+.zone-list-row:hover,.zone-list-row:focus-visible{border-color:#5180c1;background:#f2f7ff}
+.zone-list-selected{border-color:#336ab0;background:#edf5ff}
+.zone-list-row span:first-child{display:grid;gap:2px}
+.zone-list-row small{color:var(--muted);font-size:11px}
+.zone-activity{color:#44556c;white-space:nowrap;font-size:12px}
+.zone-footnote{font-size:12px;line-height:1.5;color:var(--muted);margin:0}
+.zone-footnote .link{margin-left:9px}
+@media(max-width:600px){.zone-list-row,.zone-status{align-items:flex-start;flex-direction:column}.zone-activity{white-space:normal}}
