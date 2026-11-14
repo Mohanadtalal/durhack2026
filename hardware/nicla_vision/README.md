@@ -361,67 +361,70 @@ backend. Even with full-resolution input, busy crossing footage may have
 **no** paths meeting the approach criteria. It is not evidence that
 an actual collision was imminent.
 
-## Road-aware vehicle/person prediction (safer experimental version)
+## Autonomous vehicle-to-worker prediction (current experimental version)
 
-The initial version sometimes warned when a car was driving past someone
-standing on the far-side **pavement**. At 4.4s and 44.7s in the urban crossing
-demo, the image-space vehicle and person positions appeared to converge, but
-the pedestrians were waiting near the kerb. No real collision was established.
+**No marked road, crossing or restricted zone is required for vehicle-to-person
+approach detection.** This is appropriate for moving vehicles at construction
+sites, loading bays and temporary works areas where a road polygon is not
+available or would be impractical.
 
-**The refined predictor now REQUIRES a manually marked vehicle/crossing
-conflict polygon. With no polygon, it will NOT raise car/person warnings.**
-This is intentional: 2D motion alone cannot establish the road's location.
-Do not mark the pavement or the waiting area. Cover the relevant traffic
-lane and pedestrian crossing where a pedestrian could actually meet a vehicle.
+The Nicla/MP4 predictor now tracks **people, cars, buses and trucks** using
+the standard COCO classes 0, 2, 5 and 7. It estimates short-horizon image-space
+motion using multiple frames, requires sustained approach toward a person,
+and compares projected **ground-contact points** (bottom-centres of the
+bounding boxes) rather than simply overlapping detection rectangles.
+It waits for two consecutive candidate frames before issuing a warning.
+This reduces some false alarms from vehicles passing pedestrians who appear
+close in an image but stand at a different visible ground level.
 
-The detector now uses a short **multi-frame least-squares motion trend**
-instead of estimating speed from a single pair of frames. It also requires
-stable track IDs, path convergence inside the SAME marked road area, and:
-- the pedestrian's box footpoint is already inside that area, **or**
-- the pedestrian is moving into that area based on several frames of
-  meaningful movement (not minor bounding-box jitter).
+**It is still NOT an actual 3D collision detector.** Bounding-box bottom
+points are only ground-contact approximations, not calibrated geometry.
+Perspective, occlusions, camera vibration, shadows and incorrect tracking
+can cause both false alarms and missed hazards. This cannot be used as a
+real-world safety warning device. The Nicla's ToF sensor does not measure
+distance between a specific worker and vehicle.
 
-These are heuristics, not metric world-space tracking, 3D depth, validated
-time-to-collision, or a guarantee against false positives/false negatives.
+### Test automatic prediction on the original colour MP4
 
-### 1. Mark the road directly on the downloaded colour MP4
-
-```powershell
-python -m edge.nicla_video_test --video data/pedestrians.mp4 --mark-road --motion-debug --save data/road_aware_demo.mp4
-```
-
-A paused first video frame opens. **Left-click 3–12 points** outlining
-the relevant road/crossing *where a collision could occur*, avoiding the
-far-side waiting pavement. Press **S** to save. Press **U** to undo a point;
-**R** clears existing road polygons; **Q** cancels. The script then
-restarts the source video, uses those saved road areas to filter predictions,
-and saves an annotated MP4 (magenta road outlines). Polygons are stored in
-`data/video_road_conflicts.json` and persist between runs.
-
-Later runs can omit `--mark-road`:
+No mouse clicks or road-zone setup needed:
 
 ```powershell
-python -m edge.nicla_video_test --video data/pedestrians.mp4 --motion-debug --save data/road_aware_demo.mp4
+python -m edge.nicla_video_test --video data/pedestrians.mp4 --motion-debug --save data/auto_vehicle_demo.mp4
 ```
 
-### 2. Mark the conflict area in live Nicla video
+The CLI prints tracked vehicle/person counts and why an alert did not fire.
+Use safely sourced staged/simulated footage that actually shows a vehicle
+converging on a worker to test positive cases. A generic urban crossing may
+not contain a genuine risk.
+
+### Test autonomous prediction on the live Nicla
 
 ```powershell
 python -m edge.nicla_detector --port COM9 --no-api --predictive --motion-debug
 ```
 
-In the camera window press **L** to draw a road/crossing area, left-click
-3–12 corners, then press **S** to save. Road conflict areas show in
-**magenta** and persist to `data/nicla_road_conflicts.json`. Keep the Nicla
-camera fixed after drawing; moving it invalidates the screen-space polygons.
+Do not mark any region. This can detect a tracked car, bus or truck approaching
+a person anywhere in the camera image. A moving forklift requires a suitable
+separately trained model; the default COCO detector has no forklift class.
 
-- **E → clicks → S**: creates an ordinary restricted/danger zone as before.
-- **L → clicks → S**: creates a separate **vehicle conflict area**.
-- **R**: clears ordinary danger zones only.
-- **K**: clears road conflict polygons only.
-- **U**: undo a corner; **C**: cancel unfinished edit; **Q**: quit.
+### Optional advanced road/crossing filter
 
-Road polygons **do not** themselves trigger restricted-zone alerts.
-Only confirmed moving-car / pedestrian conflict predictions trigger that
-kind of hazard. As before, the system is a demo and must not be used for
-real collision prevention or tested with real near misses.
+For installations where a road polygon is genuinely useful, marking one is
+**optional**. A previously saved road polygon will not restrict automatic
+prediction unless the operator explicitly adds `--road-filter`.
+
+On the live camera, draw a road area using **L → mouse corners → S**, then
+restart with `--predictive --road-filter` (requires an existing saved area).
+`K` clears the optional road polygons. Ordinary restricted-zone editing
+**E → clicks → S** is unaffected.
+
+On an original MP4, `--mark-road` opens the mouse editor and **enables**
+the optional filter for that run. Later reuses of the saved polygon require
+`--road-filter` explicitly:
+
+```powershell
+python -m edge.nicla_video_test --video data/pedestrians.mp4 --motion-debug --road-filter
+```
+
+This optional filter can suppress otherwise valid warnings when users draw
+an incorrect polygon, so it is deliberately **OFF by default**.
