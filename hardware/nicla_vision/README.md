@@ -25,6 +25,36 @@ python -m edge.nicla_detector --port COM5 --preview-only
 
 Replace COM5 with your device port. The camera preview should appear. Press `q` to quit.
 
+## Interactive restricted-zone editor (laptop only)
+
+The camera preview now supports a user-defined **polygon** restricted zone.
+No changes to Nicla firmware or to other developers' backend/frontend are needed.
+
+1. Run `python -m edge.nicla_detector --port COM9 --no-api --dwell 5`
+   from the repository root (change COM9 if Windows assigns another port).
+2. Click the camera preview window and press **E** to enter new-zone mode.
+3. **Left-click** 3–12 corners around your chosen danger area. A yellow line
+   and numbered yellow points show the pending polygon.
+4. Press **U** to undo the last corner, **S** to save/activate the polygon,
+   or **C** to cancel editing without changing the active zone.
+5. Press **R** to remove the saved polygon and restore the default rectangle.
+   Press **Q** to quit the camera window.
+
+The saved file is `data/nicla_zone.json` on your **Windows laptop**, not on
+the Nicla USB drive. The `data/` directory is Git-ignored; the choice survives
+restarts without affecting teammates. The polygon uses normalized coordinates,
+so it also scales to different image sizes.
+
+During editing, the previously active zone continues to control detection.
+Saving/resetting restarts occupancy/dwell tracking for the newly selected zone.
+The program rejects fewer than three corners, duplicate vertices, very small
+or self-intersecting polygons; errors appear in the terminal. This is a
+visual heuristic and must not be relied on as a real-world safety boundary.
+
+You can test editing **without YOLO** using:
+`python -m edge.nicla_detector --port COM9 --preview-only`
+The drawn region persists, and you can then run `--no-api --dwell 5`.
+
 ## Step 3 — Detect a person and flash red LED
 
 ```powershell
