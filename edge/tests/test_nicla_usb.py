@@ -11,6 +11,7 @@ class SerialStub:
         self.closed = False
     def write(self, data):
         self.writes.append(data)
+        return len(data)
     def flush(self):
         pass
     def read(self, size):
@@ -52,3 +53,22 @@ def test_raw_size_validation():
     stub = SerialStub(struct.pack("<L", 100))
     with pytest.raises(NiclaProtocolError, match="Unexpected raw frame size"):
         NiclaUSB(stub).snapshot_gray(width=8, height=4)
+
+def test_distance_available_and_unavailable():
+    assert NiclaUSB(SerialStub(struct.pack("<L", 850))).distance_mm() == 850
+    assert NiclaUSB(SerialStub(struct.pack("<L", 0xFFFFFFFF))).distance_mm() is None
+    with pytest.raises(NiclaProtocolError):
+        NiclaUSB(SerialStub(struct.pack("<L", 4100))).distance_mm()
+
+def test_partial_command_write_and_disconnect_cleanup():
+    class Partial(SerialStub):
+        def write(self, data):
+            return 2
+    with pytest.raises(NiclaProtocolError, match="incomplete"):
+        NiclaUSB(Partial()).ping()
+    class Broken(SerialStub):
+        def write(self, data):
+            raise OSError("unplugged")
+    stub = Broken()
+    NiclaUSB(stub).close()
+    assert stub.closed

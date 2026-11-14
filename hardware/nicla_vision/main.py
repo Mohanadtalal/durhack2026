@@ -20,6 +20,10 @@ camera.framesize(csi.QVGA)       # 320 x 240 = 76,800 bytes per frame.
 camera.framebuffers(1)
 camera.snapshot(time=2000)
 
+# Initialise the ToF sensor lazily; normal camera mode is unaffected.
+tof = None
+tof_initialised = False
+
 def send_all(data):
     # A USB send is allowed to write fewer bytes than requested.
     view = memoryview(data)
@@ -46,6 +50,26 @@ while True:
             send_all(jpg)
         except OSError:
             send_all(struct.pack("<L", 0))
+    elif command == b"dist":
+        # A 4-byte unsigned distance in mm, 0xFFFFFFFF if unavailable.
+        # Arduino's Nicla board uses a VL53L1 on internal I2C bus 2.
+        if not tof_initialised:
+            tof_initialised = True
+            try:
+                from machine import I2C
+                from vl53l1x import VL53L1X
+                tof = VL53L1X(I2C(2))
+            except Exception:
+                tof = None
+        mm = 0xFFFFFFFF
+        if tof is not None:
+            try:
+                value = int(tof.read())
+                if 20 <= value <= 4000:
+                    mm = value
+            except Exception:
+                pass
+        send_all(struct.pack("<L", mm))
     elif command == b"warn":
         red.on()
     elif command == b"safe":
