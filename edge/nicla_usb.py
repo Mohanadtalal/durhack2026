@@ -1,4 +1,4 @@
-"""Nicla USB Virtual COM bridge. Laptop requests 4-byte commands."""
+"""Nicla USB Virtual COM bridge. Laptop requests four-byte commands."""
 import struct
 
 MAX_JPEG_BYTES = 1_000_000
@@ -41,9 +41,30 @@ class NiclaUSB:
         self._send(b"ping")
         return self._read_exact(4) == b"PONG"
 
+    def snapshot_gray(self, width: int = 320, height: int = 240) -> bytes:
+        """Request uncompressed 8-bit grayscale frame using 'raw0' command.
+
+        Returns exactly width*height bytes, row-major. Avoids OpenMV JPEG
+        compression issues. The board program must support 'raw0'.
+        """
+        expected = width * height
+        if not (0 < expected <= 1_000_000):
+            raise ValueError("Invalid grayscale dimensions")
+        self._send(b"raw0")
+        (size,) = struct.unpack("<L", self._read_exact(4))
+        if size != expected:
+            raise NiclaProtocolError(
+                "Unexpected raw frame size %d (expected %d). "
+                "Install updated hardware/nicla_vision/main.py on the Nicla." % (size, expected)
+            )
+        return self._read_exact(size)
+
     def snapshot_jpeg(self) -> bytes:
+        """Optional JPEG diagnostic path, may fail on some firmware builds."""
         self._send(b"snap")
         (size,) = struct.unpack("<L", self._read_exact(4))
+        if size == 0:
+            raise NiclaProtocolError("Nicla JPEG encoder failed; use snapshot_gray()")
         if not 100 <= size <= MAX_JPEG_BYTES:
             raise NiclaProtocolError("Unexpected JPEG size %d. Check firmware and serial port." % size)
         data = self._read_exact(size)

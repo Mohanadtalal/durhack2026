@@ -1,33 +1,54 @@
-# Nicla Vision: save as main.py ON THE BOARD via OpenMV IDE.
-# USB VCP: snap -> little-endian uint32 size + JPEG; warn/safe -> red LED; ping -> PONG.
-# For a harmless hackathon demonstration only, never a certified alarm.
+# SiteGuardian AI — Nicla Vision OpenMV firmware.
+# Raw grayscale USB streaming avoids JPEG encoder failures seen on v5.0.1.
+# The 'snap' command remains for diagnostic JPEG attempts; 'raw0' is preferred.
+# Save as /flash/main.py (Windows USB drive: main.py), EJECT, then power-cycle.
+# Hackathon prototype only. Not a certified construction safety system.
 import csi
 import struct
 from pyb import USB_VCP
-try:
-    from machine import LED
-    red = LED("LED_RED")
-except (ImportError, ValueError, TypeError):
-    from pyb import LED
-    red = LED(1)
 
+from machine import LED
+red = LED("LED_RED")
 red.off()
+
 usb = USB_VCP()
+usb.setinterrupt(-1)  # Disable Ctrl-C character handling for raw binary frames.
 camera = csi.CSI()
 camera.reset()
-camera.pixformat(csi.RGB565)
-camera.framesize(csi.QVGA)
+camera.pixformat(csi.GRAYSCALE)  # One byte per pixel; no JPEG dependency.
+camera.framesize(csi.QVGA)       # 320 x 240 = 76,800 bytes per frame.
+camera.framebuffers(1)
 camera.snapshot(time=2000)
+
+def send_all(data):
+    # A USB send is allowed to write fewer bytes than requested.
+    view = memoryview(data)
+    offset = 0
+    while offset < len(view):
+        count = usb.send(view[offset:offset + 512], timeout=5000)
+        if not count:
+            raise OSError("USB transfer timed out")
+        offset += count
 
 while True:
     command = usb.recv(4, timeout=1000)
-    if command == b"snap":
-        frame = camera.snapshot().to_jpeg()
-        usb.send(struct.pack("<L", frame.size()))
-        usb.send(frame)
+    if command == b"raw0":
+        image = camera.snapshot()
+        pixels = image.bytearray()
+        send_all(struct.pack("<L", len(pixels)))
+        send_all(pixels)
+    elif command == b"snap":
+        # Optional diagnostic path only. Avoid breaking the serial protocol
+        # if this board's JPEG encoder cannot compress the image.
+        try:
+            jpg = camera.snapshot().to_jpeg(quality=35, copy=True)
+            send_all(struct.pack("<L", jpg.size()))
+            send_all(jpg)
+        except OSError:
+            send_all(struct.pack("<L", 0))
     elif command == b"warn":
         red.on()
     elif command == b"safe":
         red.off()
     elif command == b"ping":
-        usb.send(b"PONG")
+        send_all(b"PONG")

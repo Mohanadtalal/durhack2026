@@ -41,3 +41,14 @@ def test_bad_size_and_timeout():
         NiclaUSB(SerialStub(struct.pack("<L", 4))).snapshot_jpeg()
     with pytest.raises(NiclaProtocolError):
         NiclaUSB(SerialStub()).snapshot_jpeg()
+
+def test_raw_frame_transfer():
+    pixels = bytes(range(32))
+    stub = SerialStub(struct.pack("<L", len(pixels)) + pixels)
+    assert NiclaUSB(stub).snapshot_gray(width=8, height=4) == pixels
+    assert stub.writes == [b"raw0"]
+
+def test_raw_size_validation():
+    stub = SerialStub(struct.pack("<L", 100))
+    with pytest.raises(NiclaProtocolError, match="Unexpected raw frame size"):
+        NiclaUSB(stub).snapshot_gray(width=8, height=4)

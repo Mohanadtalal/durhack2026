@@ -1,7 +1,7 @@
 # Nicla Vision: OpenMV + USB laptop bridge
 
 Your Nicla Vision has an onboard camera and RGB LED. This branch uses **USB**, not Wi-Fi.
-The board sends JPEG snapshots to your laptop; laptop YOLO detects people, and sends
+The board sends raw 320x240 grayscale frames to your laptop (no JPEG compression); laptop YOLO detects people, and sends
 4-byte `warn`/`safe` commands to control the onboard red LED.
 
 ## Step 1 — Verify the board
@@ -47,3 +47,31 @@ shared incident schema is unchanged.
 - This red LED command depends on the laptop; independent offline board-side protection is a later feature.
 - The first YOLO run can download weights; the camera is limited to QVGA images.
 - Never demonstrate with actual hazards or use in a real construction site.
+
+## Fix for firmware 5.0.1: "OSError: Compression Failed!"
+
+Your COM9 PING succeeds but the earlier JPEG encoder failed. The updated
+`main.py` uses **raw grayscale transfer** using the four-byte command `raw0`.
+It sends a four-byte little-endian payload length (76800), then 76800 pixel
+bytes. The laptop builds a 320x240 image using NumPy and converts it to BGR
+for OpenCV and YOLO. This bypasses JPEG entirely.
+
+### Replace old firmware safely
+1. Download the latest `feat/edge-vision-nicla` branch on Windows with
+   `git pull --ff-only origin feat/edge-vision-nicla`.
+2. Ensure OpenMV IDE and camera test program are **closed**.
+3. In File Explorer confirm that `D:` is the Nicla Vision storage drive;
+   its drive letter may change. Keep a backup of the current `main.py`.
+4. Copy `hardware/nicla_vision/main.py` from your clone **onto the Nicla's
+   USB drive**, overwriting the existing `main.py`. You can instead use
+   OpenMV IDE's "Save Open Script to OpenMV Cam" if that works.
+5. Safely **Eject** the Nicla USB storage drive to flush pending writes.
+   Unplug and reconnect the board to cold-boot the new program.
+6. Close OpenMV IDE and run
+   `python -m edge.nicla_detector --port COM9 --preview-only`.
+7. To test the USB protocol alone, you can use the Windows one-liner
+   `python -c "from edge.nicla_usb import NiclaUSB; n=NiclaUSB.connect('COM9'); print(n.ping()); print(len(n.snapshot_gray())); n.close()"`
+   and expect `True` then `76800`.
+
+If `raw0` still fails, leave the flash filesystem intact and capture the
+exact terminal output. Do not reflash or erase the board just to troubleshoot.

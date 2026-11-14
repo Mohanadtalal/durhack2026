@@ -42,10 +42,9 @@ def run(port, preview_only=False, no_api=False, dwell=8.0, weights="yolov8n.pt")
                 raise RuntimeError("Nicla did not respond to PING. Install hardware/nicla_vision/main.py as main.py and reboot.")
             nicla.set_warning(False, force=True)
             while True:
-                raw = nicla.snapshot_jpeg()
-                frame = cv2.imdecode(np.frombuffer(raw, dtype=np.uint8), cv2.IMREAD_COLOR)
-                if frame is None:
-                    raise RuntimeError("Nicla JPEG could not be decoded")
+                raw = nicla.snapshot_gray()
+                gray = np.frombuffer(raw, dtype=np.uint8).reshape((240, 320))
+                frame = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
                 h, w = frame.shape[:2]
                 region = zone_from_fractions(w, h)
                 people = []
