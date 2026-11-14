@@ -29,7 +29,8 @@ from .zone_rules import ZoneMonitor
 def run(port, preview_only=False, no_api=False, dwell=8.0, weights="yolov8n.pt",
         zone_file=DEFAULT_ZONE_FILE, ppe_weights=None, proximity_mm=None,
         record_path=None, retry_seconds=2.0, predictive=False, sharp_zone_ids=(),
-        motion_debug=False, road_file="data/nicla_road_conflicts.json"):
+        motion_debug=False, road_file="data/nicla_road_conflicts.json",
+        road_filter=False):
     import cv2
     import numpy as np
     from .client import send_event, flush_pending
@@ -65,6 +66,9 @@ def run(port, preview_only=False, no_api=False, dwell=8.0, weights="yolov8n.pt",
 
     editor = ZoneEditor(zone_file)
     road_editor = ZoneEditor(road_file)
+    if road_filter and not road_editor.zones:
+        raise ValueError("--road-filter needs a saved road area. First draw one "
+                         "with L, clicks and S in normal --predictive mode.")
     active_editor = editor
     predictor = PredictiveMotionMonitor() if predictive else None
     sharp_zone_ids = set(sharp_zone_ids)
@@ -119,9 +123,10 @@ def run(port, preview_only=False, no_api=False, dwell=8.0, weights="yolov8n.pt",
             print("[PREDICT] Manually marked sharp-prop zones:", sorted(sharp_zone_ids))
             print("[PREDICT] This does NOT detect sharp objects or verify walking backward.")
         print("[PREDICT] Use a fixed Nicla camera. Predictions are not physical collision distances.")
-        if not road_editor.zones:
-            print("[ROAD] Car/person warnings DISABLED until you mark the road/crossing area.")
-            print("[ROAD] Press L, click at least three points around a vehicle conflict area, S.")
+        if road_filter:
+            print("[PREDICT] Optional road-region filtering ENABLED")
+        else:
+            print("[PREDICT] AUTOMATIC vehicle/worker assessment enabled - no zones required.")
     if proximity is not None:
         print("[ToF] Forward object alert threshold:", proximity.threshold_mm, "mm")
         print("[ToF] Requires updated main.py on Nicla. Does not measure person distance.")
@@ -161,7 +166,7 @@ def run(port, preview_only=False, no_api=False, dwell=8.0, weights="yolov8n.pt",
                             if predictor is not None:
                                 people_result = person_model.track(
                                     inference_frame, persist=True, tracker="bytetrack.yaml",
-                                    conf=0.35, classes=[0, 2], verbose=False
+                                    conf=0.35, classes=[0, 2, 5, 7], verbose=False
                                 )[0]
                                 boxes = people_result.boxes
                                 xyxy = boxes.xyxy.cpu().numpy()
@@ -179,7 +184,8 @@ def run(port, preview_only=False, no_api=False, dwell=8.0, weights="yolov8n.pt",
                                     x1, y1, x2, y2 = coords
                                     color = (50, 220, 120) if kind == 0 else (0, 165, 255)
                                     cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-                                    kind_name = "PERSON" if kind == 0 else "CAR"
+                                    kind_name = {0: "PERSON", 2: "CAR",
+                                                 5: "BUS", 7: "TRUCK"}.get(kind, "VEHICLE")
                                     cv2.putText(
                                         frame, f"{kind_name} #{ident if ident is not None else '?'}",
                                         (x1, max(20, y1 - 4)), cv2.FONT_HERSHEY_SIMPLEX,
@@ -261,8 +267,9 @@ def run(port, preview_only=False, no_api=False, dwell=8.0, weights="yolov8n.pt",
                                       if i + 1 in sharp_zone_ids]
                             for prediction in predictor.update(
                                     tracked, now, width, height, sharp_zones=marked,
-                                    road_zones=[(i + 1, poly)
-                                                for i, poly in enumerate(road_regions)]):
+                                    road_zones=([(i + 1, poly)
+                                                 for i, poly in enumerate(road_regions)]
+                                                if road_filter else ())):
                                 if prediction.hazard_type == "vehicle_approaching_person":
                                     zone_id = f"nicla-car-{prediction.source_id}"
                                     extra = {"vehicle_track_id": prediction.source_id,
@@ -294,7 +301,7 @@ def run(port, preview_only=False, no_api=False, dwell=8.0, weights="yolov8n.pt",
 
                         # Magenta road/crossing regions are separate from
                         # danger zones; they don't trigger ordinary zone alerts.
-                        for i, region in enumerate(road_regions):
+                        for i, region in enumerate(road_regions if road_filter else []):
                             cv2.polylines(frame, [np.array(region, dtype=np.int32)],
                                           True, (255, 80, 190), 2)
                             rx = min(x for x, y in region)
@@ -346,7 +353,7 @@ def run(port, preview_only=False, no_api=False, dwell=8.0, weights="yolov8n.pt",
                                     last_motion_debug_log = now
                             for n, threat in enumerate(predictor.active[:2]):
                                 if threat.hazard_type == "vehicle_approaching_person":
-                                    label = f"APPROACH: CAR {threat.source_id} -> PERSON {threat.target_id}"
+                                    label = f"APPROACH: VEHICLE {threat.source_id} -> PERSON {threat.target_id}"
                                     car = predictor.tracks.get(threat.source_id)
                                     person = predictor.tracks.get(threat.target_id)
                                     if car is not None and person is not None:
@@ -508,13 +515,15 @@ def main():
     parser.add_argument("--motion-debug", action="store_true",
                         help="Show why an approaching-car warning is not firing; requires --predictive")
     parser.add_argument("--road-file", default="data/nicla_road_conflicts.json",
-                        help="Separate locally saved vehicle/pedestrian conflict area polygons")
+                        help="Separate, optional vehicle/pedestrian conflict area polygons")
+    parser.add_argument("--road-filter", action="store_true",
+                        help="Optional marked-road filtering; OFF by default; needs a saved polygon")
     args = parser.parse_args()
     try:
         run(args.port, args.preview_only, args.no_api, args.dwell, args.weights,
             args.zone_file, args.ppe_weights, args.proximity_mm,
             args.record, args.retry_seconds, args.predictive, args.sharp_zone,
-            args.motion_debug, args.road_file)
+            args.motion_debug, args.road_file, args.road_filter)
     except KeyboardInterrupt:
         print("[EXIT] Interrupted by user")
 

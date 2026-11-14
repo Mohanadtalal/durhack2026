@@ -91,7 +91,7 @@ def mark_conflict_area(first_frame, path):
 
 def run(video, weights="yolov8n.pt", conf=0.25, analysis_fps=8.0,
         motion_debug=False, save=None, road_file="data/video_road_conflicts.json",
-        mark_road=False):
+        mark_road=False, road_filter=False):
     # Keep OpenCV and YOLO optional so unit tests can run in lightweight CI.
     import cv2
     from ultralytics import YOLO
@@ -126,10 +126,13 @@ def run(video, weights="yolov8n.pt", conf=0.25, analysis_fps=8.0,
             road_editor = mark_conflict_area(first_frame, road_file)
             if not capture.set(cv2.CAP_PROP_POS_FRAMES, 0):
                 raise RuntimeError("Could not reset MP4 after configuring road")
-        print("[ROAD] Loaded", len(road_editor.zones), "marked crossing/conflict area(s)")
-        if not road_editor.zones:
-            print("[ROAD] Vehicle/person alerts DISABLED until you define road/crossing.")
-            print("[ROAD] Run again with --mark-road to click a road polygon.")
+        print("[ROAD] Loaded", len(road_editor.zones), "optional crossing area(s)")
+        if road_filter or mark_road:
+            if not road_editor.zones:
+                raise ValueError("Road filtering selected, but no polygon was saved.")
+            print("[PREDICT] Applying optional marked-road filter.")
+        else:
+            print("[PREDICT] AUTOMATIC vehicle/person assessment; no marked areas needed.")
         print("[MODEL] Loading:", weights)
         model = YOLO(weights)
         monitor = PredictiveMotionMonitor()
@@ -150,7 +153,7 @@ def run(video, weights="yolov8n.pt", conf=0.25, analysis_fps=8.0,
             height, width = frame.shape[:2]
             result = model.track(
                 frame, persist=True, tracker="bytetrack.yaml",
-                conf=conf, classes=[0, 2], imgsz=640, verbose=False
+                conf=conf, classes=[0, 2, 5, 7], imgsz=640, verbose=False
             )[0]
             boxes = result.boxes
             items = []
@@ -166,7 +169,7 @@ def run(video, weights="yolov8n.pt", conf=0.25, analysis_fps=8.0,
                     items.append((ident, category, xyxy))
                 x1, y1, x2, y2 = xyxy
                 tint = (60, 210, 80) if category == 0 else (0, 170, 255)
-                label = "PERSON" if category == 0 else "CAR"
+                label = {0: "PERSON", 2: "CAR", 5: "BUS", 7: "TRUCK"}.get(category, "VEHICLE")
                 cv2.rectangle(frame, (x1, y1), (x2, y2), tint, 2)
                 cv2.putText(frame, f"{label} #{ident if ident is not None else '?'}",
                             (x1, max(22, y1 - 5)), cv2.FONT_HERSHEY_SIMPLEX,
@@ -174,8 +177,10 @@ def run(video, weights="yolov8n.pt", conf=0.25, analysis_fps=8.0,
             road_regions = road_editor.pixels(width, height)
             alerts = monitor.update(
                 items, timestamp, width, height,
-                road_zones=[(i + 1, poly) for i, poly in enumerate(road_regions)])
-            for i, polygon in enumerate(road_regions):
+                road_zones=([(i + 1, poly) for i, poly in enumerate(road_regions)]
+                            if road_filter or mark_road else ()))
+            for i, polygon in enumerate(
+                    road_regions if road_filter or mark_road else []):
                 import numpy as np
                 cv2.polylines(frame, [np.asarray(polygon, dtype=np.int32)],
                               True, (255, 60, 190), 3)
@@ -270,12 +275,14 @@ def main():
     parser.add_argument("--road-file", default="data/video_road_conflicts.json",
                         help="Saved road/crossing polygons in original video coordinates")
     parser.add_argument("--mark-road", action="store_true",
-                        help="Click corners of vehicle travel/crossing area on video first frame")
+                        help="Optionally click road-area corners, then filter predictions")
+    parser.add_argument("--road-filter", action="store_true",
+                        help="Use saved road polygons as an optional extra restriction")
     args = parser.parse_args()
     run(args.video, weights=args.weights, conf=args.conf,
         analysis_fps=args.analysis_fps, motion_debug=args.motion_debug,
         save=args.save, road_file=args.road_file,
-        mark_road=args.mark_road)
+        mark_road=args.mark_road, road_filter=args.road_filter)
 
 
 if __name__ == "__main__":
