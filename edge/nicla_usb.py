@@ -25,7 +25,9 @@ class NiclaUSB:
     def _send(self, command: bytes):
         if len(command) != 4:
             raise ValueError("Command must be 4 bytes")
-        self.transport.write(command)
+        written = self.transport.write(command)
+        if written != len(command):
+            raise NiclaProtocolError("USB command write incomplete")
         self.transport.flush()
 
     def _read_exact(self, size: int) -> bytes:
@@ -40,6 +42,11 @@ class NiclaUSB:
     def ping(self) -> bool:
         self._send(b"ping")
         return self._read_exact(4) == b"PONG"
+
+    def firmware_version(self) -> bytes:
+        """Probe new firmware. Old programs ignore vers and time out."""
+        self._send(b"vers")
+        return self._read_exact(4)
 
     def snapshot_gray(self, width: int = 320, height: int = 240) -> bytes:
         """Request uncompressed 8-bit grayscale frame using 'raw0' command.
@@ -58,6 +65,20 @@ class NiclaUSB:
                 "Install updated hardware/nicla_vision/main.py on the Nicla." % (size, expected)
             )
         return self._read_exact(size)
+
+    def distance_mm(self) -> int | None:
+        """Forward ToF sensor reading in millimetres; None means unavailable.
+
+        Requires Nicla OpenMV firmware supporting four-byte 'dist' command.
+        Measures a single target straight ahead, NOT each detected person.
+        """
+        self._send(b"dist")
+        (distance,) = struct.unpack("<L", self._read_exact(4))
+        if distance == 0xFFFFFFFF:
+            return None
+        if not 20 <= distance <= 4000:
+            raise NiclaProtocolError("Invalid distance value: %d mm" % distance)
+        return distance
 
     def snapshot_jpeg(self) -> bytes:
         """Optional JPEG diagnostic path, may fail on some firmware builds."""
@@ -79,8 +100,11 @@ class NiclaUSB:
         self._warning = active
 
     def close(self):
+        # When the cable disconnects, the LED-off write can fail. Close anyway.
         try:
             self.set_warning(False, force=True)
+        except (OSError, NiclaProtocolError):
+            pass
         finally:
             self.transport.close()
 

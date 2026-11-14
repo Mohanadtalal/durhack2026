@@ -17,3 +17,5 @@ data/
 .vscode/
 *.pem
 *.key
+*.pt
+*.onnx

@@ -111,3 +111,119 @@ for OpenCV and YOLO. This bypasses JPEG entirely.
 
 If `raw0` still fails, leave the flash filesystem intact and capture the
 exact terminal output. Do not reflash or erase the board just to troubleshoot.
+
+## Next Developer 1 features: distance sensor, PPE weights, recording and USB retry
+
+The normal command **continues to work with existing Nicla firmware**:
+```powershell
+python -m edge.nicla_detector --port COM9 --no-api --dwell 5
+```
+All features below are opt-in. Use a fresh working branch for testing before
+merging. OpenMV IDE must be closed whenever Python is connected to COM9.
+
+### 1. Record a demo MP4 — no firmware changes
+
+```powershell
+python -m edge.nicla_detector --port COM9 --no-api --dwell 5 --record data/siteguardian_demo.mp4
+```
+
+An annotated MP4 is saved after quitting with Q. The file remains on the
+laptop and is Git-ignored. VideoWriter uses an approximately 10 FPS timeline;
+if optional PPE inference slows processing significantly, video duration may
+differ from wall time. Obtain permission before recording identifiable people.
+The physical Nicla LED is not visible in the video unless filmed separately.
+
+### 2. Auto-reconnect after USB dropouts
+
+The laptop retries connecting every 2 seconds if serial open/transfer fails,
+and resets hazard states before processing resumes. You may choose
+`--retry-seconds 3`. Keep the window open; press Q to exit or Ctrl+C.
+If the laptop or cable stops working, the system **cannot provide a reliable
+safety warning**; this is a demo convenience, not resilience certification.
+
+### 3. Forward ToF proximity warning — requires updating board `main.py`
+
+The Arduino Nicla Vision's onboard VL53L1CB measures **one forward distance**,
+typically up to 4 m, with a narrow field of view. It does **not** measure
+the distance to each YOLO bounding box and must not be described as
+person-to-machinery distance.
+
+Official Nicla/OpenMV reference:
+https://docs.arduino.cc/tutorials/nicla-vision/user-manual
+
+**Before updating your working board**:
+1. Save a copy of the current working `D:\\main.py` on the laptop.
+2. Verify D: is still your Nicla drive.
+3. Copy this branch's `hardware/nicla_vision/main.py` to `D:\\main.py`.
+4. Safely eject D:, unplug/replug Nicla, and close OpenMV IDE.
+
+The updated firmware adds the four-byte command `dist`, returning a 32-bit
+unsigned little-endian millimetre reading; `0xFFFFFFFF` means unavailable.
+It lazily loads the sensor so the existing `raw0` stream is unchanged.
+
+Test the sensor protocol first:
+```powershell
+python -c "from edge.nicla_usb import NiclaUSB; n=NiclaUSB.connect('COM9'); print('PING', n.ping()); print('DISTANCE_MM', n.distance_mm()); n.close()"
+```
+A number such as 650 means an object about 650 mm in front of the sensor.
+`None` means sensor not ready/unavailable, not that the area is clear.
+Then run:
+```powershell
+python -m edge.nicla_detector --port COM9 --no-api --proximity-mm 800
+```
+Two consecutive readings at or below 800 mm activate a forward-proximity
+alert; two readings above 800 mm clear it. The LED is red when any zone, PPE
+(if enabled), or ToF alert is active.
+
+### 4. Optional PPE model (helmet and safety vest)
+
+The default `yolov8n.pt` COCO model detects people but **not missing PPE**.
+The `--ppe-weights` flag loads **separate** YOLO weights with explicit
+`no_helmet` and/or `no_vest` classes, including aliases `no-hardhat`
+and `no-safety vest`. If neither class exists, startup rejects the model.
+No absence is inferred solely because a helmet/vest was not detected.
+
+One publicly available, independently maintained research model for
+evaluation (its benchmark is model-author-reported; not safety-certified):
+https://huggingface.co/constructelligence/construction-site-safety-hazards
+
+Download its optional 22.6 MB PyTorch `.pt` weights into a local
+Git-ignored folder:
+```powershell
+python -m pip install huggingface_hub
+python -c "from huggingface_hub import hf_hub_download; print(hf_hub_download(repo_id='constructelligence/construction-site-safety-hazards', filename='buildvision-hazards-v0.3.pt', local_dir='data/models'))"
+python -m edge.nicla_detector --port COM9 --no-api --dwell 5 --ppe-weights data/models/buildvision-hazards-v0.3.pt
+```
+
+This third-party model uses AGPL-3.0 weights. Check licensing if the project
+will be distributed commercially, and test with consented demo images. The
+320x240 grayscale Nicla feed may miss or misclassify PPE, especially when
+small or occluded. No real safety decisions should rely on these detections.
+
+### Combined demonstration
+
+After testing each independent mode:
+```powershell
+python -m edge.nicla_detector --port COM9 --no-api --dwell 5 --proximity-mm 800 --ppe-weights data/models/buildvision-hazards-v0.3.pt --record data/siteguardian_demo.mp4
+```
+
+### Diagnosis for PING works but DIST times out
+
+The board script now supports `vers` and returns a four-byte version marker
+`SG03`. This distinguishes a freshly loaded firmware from older scripts that
+respond `PONG` but ignore `dist`.
+
+After copying this updated feature-branch `main.py` onto the Nicla USB drive,
+safely eject the drive, **unplug and reconnect the USB cable**, keep OpenMV IDE
+closed, and run (with your venv active):
+
+```powershell
+python -c "from edge.nicla_usb import NiclaUSB; n=NiclaUSB.connect('COM9'); print('PING:',n.ping()); print('VERSION:',n.firmware_version()); print('DISTANCE:',n.distance_mm()); n.close()"
+```
+
+Expect `PING: True`, `VERSION: b'SG03'`, and either a distance
+in millimetres or `DISTANCE: None` if the ToF sensor is unavailable.
+
+If VERSION times out, the running board script is still old or did not
+reload. If the marker appears but DIST fails, capture the full error and
+isolate the ToF code without changing the known-good raw camera path.
