@@ -43,7 +43,7 @@ jobs:
           for i in $(seq 1 40); do curl -fsS http://127.0.0.1:5173/ > /dev/null && break || sleep 1; done
           curl -fsS http://127.0.0.1:5173/ > /dev/null
       - name: Exercise edge -> HTTP -> storage -> stats -> Gemini error -> offline replay
-        run: python audit/system_http_smoke.py
+        run: python -m audit.system_http_smoke
       - name: Exercise UI in Chromium
         run: cd frontend && npx playwright test --config playwright.audit.config.js
       - name: Collect audit screenshots and service logs
