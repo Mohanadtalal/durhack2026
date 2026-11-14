@@ -25,35 +25,41 @@ python -m edge.nicla_detector --port COM5 --preview-only
 
 Replace COM5 with your device port. The camera preview should appear. Press `q` to quit.
 
-## Interactive restricted-zone editor (laptop only)
+## Interactive **multiple** restricted zones (laptop only)
 
-The camera preview now supports a user-defined **polygon** restricted zone.
-No changes to Nicla firmware or to other developers' backend/frontend are needed.
+The camera starts with **no restricted zones**, and every new zone you save
+is **added to** your existing zones, rather than replacing them. Up to 12
+polygon zones can be configured, each with 3–12 corners. Each zone gets
+independent entry and prolonged-exposure events, and the Nicla's LED lights
+red whenever a person is detected in **any** zone.
 
 1. Run `python -m edge.nicla_detector --port COM9 --no-api --dwell 5`
-   from the repository root (change COM9 if Windows assigns another port).
-2. Click the camera preview window and press **E** to enter new-zone mode.
-3. **Left-click** 3–12 corners around your chosen danger area. A yellow line
-   and numbered yellow points show the pending polygon.
-4. Press **U** to undo the last corner, **S** to save/activate the polygon,
-   or **C** to cancel editing without changing the active zone.
-5. Press **R** to remove the saved polygon and restore the default rectangle.
-   Press **Q** to quit the camera window.
+   from the project directory. OpenMV IDE must be closed.
+2. Click the camera window and press **E** to start **adding** a new zone.
+3. **Left-click** its polygon corners. Press **U** to undo a corner.
+4. Press **S** to save and activate this zone. Existing zones stay on screen.
+5. Repeat **E → clicks → S** to add another polygon. The outlines are labelled
+   ZONE 1, ZONE 2, etc. Each occupied zone turns red independently.
+6. Press **C** to cancel only the unfinished zone.
+7. Press **R** to **delete all zones**, including their saved configuration.
+   The view then contains no rectangles/polygons. Press **Q** to quit.
 
-The saved file is `data/nicla_zone.json` on your **Windows laptop**, not on
-the Nicla USB drive. The `data/` directory is Git-ignored; the choice survives
-restarts without affecting teammates. The polygon uses normalized coordinates,
-so it also scales to different image sizes.
+Zones are persisted on the Windows laptop to **`data/nicla_zones.json`**
+(version 2), not to the Nicla storage drive. This is intentionally a new
+filename: the previous single-zone file `data/nicla_zone.json` is ignored
+and **does not bring back the old default rectangle**. Fresh installs show
+no zones. Saved zones reload on later runs until you press R to clear them.
+The `data/` directory is git-ignored, so configurations stay local.
 
-During editing, the previously active zone continues to control detection.
-Saving/resetting restarts occupancy/dwell tracking for the newly selected zone.
-The program rejects fewer than three corners, duplicate vertices, very small
-or self-intersecting polygons; errors appear in the terminal. This is a
-visual heuristic and must not be relied on as a real-world safety boundary.
+The current active zones continue detecting people while you draw another.
+The user-defined polygons are image-space approximations, not calibrated
+real-world safety boundaries. The USB firmware does not need changing.
 
-You can test editing **without YOLO** using:
+The backend keeps its existing event shape but sets `zone_id` to
+`nicla-zone-1`, `nicla-zone-2`, etc. for individual polygon events.
+
+You can edit zones without a model using:
 `python -m edge.nicla_detector --port COM9 --preview-only`
-The drawn region persists, and you can then run `--no-api --dwell 5`.
 
 ## Step 3 — Detect a person and flash red LED
 

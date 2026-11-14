@@ -1,15 +1,16 @@
 """Interactive Nicla camera zone configuration and pure polygon geometry.
 
-Persist normalized coordinates so the saved zone remains camera-resolution
-independent. Files are written on the laptop; Nicla firmware is unchanged.
+Persist normalized coordinates so every zone remains camera-resolution
+independent. The camera starts with no zones. Files are written on the laptop;
+Nicla firmware is unchanged.
 """
 import json
 import math
 from pathlib import Path
 
-DEFAULT_ZONE = ((0.35, 0.20), (0.80, 0.20), (0.80, 0.90), (0.35, 0.90))
-DEFAULT_ZONE_FILE = Path("data/nicla_zone.json")
+DEFAULT_ZONE_FILE = Path("data/nicla_zones.json")
 MAX_VERTICES = 12
+MAX_ZONES = 12
 
 
 def _on_segment(a, b, p):
@@ -100,29 +101,39 @@ def person_in_polygon(person_boxes, corners):
                for x1, y1, x2, y2 in person_boxes)
 
 
-def load_zone(path=DEFAULT_ZONE_FILE):
+def load_zones(path=DEFAULT_ZONE_FILE):
+    """Load version-2 saved zones, or start with none.
+
+    An earlier single-zone file (data/nicla_zone.json) is intentionally
+    ignored so upgrading starts with an empty camera view.
+    """
     path = Path(path)
     if not path.exists():
-        return list(DEFAULT_ZONE)
+        return []
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
-        if payload.get("version") != 1:
-            raise ValueError("Unsupported zone file version.")
-        return validate_polygon(payload["points"])
+        if not isinstance(payload, dict) or payload.get("version") != 2:
+            raise ValueError("Unsupported zone configuration version.")
+        zones = payload["zones"]
+        if not isinstance(zones, list) or len(zones) > MAX_ZONES:
+            raise ValueError("Expected at most 12 zones.")
+        return [validate_polygon(points) for points in zones]
     except (ValueError, TypeError, KeyError, OSError, AttributeError) as exc:
-        print("[ZONE] Invalid saved zone; using default:", exc)
-        return list(DEFAULT_ZONE)
+        print("[ZONE] Invalid saved zones; starting empty:", exc)
+        return []
 
 
 class ZoneEditor:
     def __init__(self, path=DEFAULT_ZONE_FILE):
         self.path = Path(path)
-        self.points = load_zone(self.path)
+        self.zones = load_zones(self.path)
         self.editing = False
         self.draft = []
 
     def pixels(self, width, height):
-        return pixels_from_normalized(self.points, width, height)
+        """Return an independent polygon for each saved restricted zone."""
+        return [pixels_from_normalized(points, width, height)
+                for points in self.zones]
 
     def draft_pixels(self, width, height):
         return pixels_from_normalized(self.draft, width, height)
@@ -146,23 +157,27 @@ class ZoneEditor:
         self.editing = False
 
     def save(self):
+        """Append a new zone; never replace any previously saved polygon."""
         if not self.editing:
             return False
         new_points = validate_polygon(self.draft)
+        if len(self.zones) >= MAX_ZONES:
+            raise ValueError("Maximum of 12 zones reached. Press R to clear all.")
+        new_zones = self.zones + [new_points]
         self.path.parent.mkdir(parents=True, exist_ok=True)
         temp_file = self.path.with_suffix(self.path.suffix + ".tmp")
         try:
-            temp_file.write_text(json.dumps({"version": 1, "points": new_points}, indent=2) + "\n",
+            temp_file.write_text(json.dumps({"version": 2, "zones": new_zones}, indent=2) + "\n",
                                  encoding="utf-8")
             temp_file.replace(self.path)
         finally:
             temp_file.unlink(missing_ok=True)
-        self.points = new_points
+        self.zones = new_zones
         self.cancel()
         return True
 
     def reset(self):
-        # Delete saved configuration first: if this fails, keep current zone.
+        """Remove all configured zones and their saved file."""
         self.path.unlink(missing_ok=True)
-        self.points = list(DEFAULT_ZONE)
+        self.zones = []
         self.cancel()
