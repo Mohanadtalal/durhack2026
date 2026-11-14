@@ -120,6 +120,7 @@ def run(port, preview_only=False, no_api=False, dwell=8.0, weights="yolov8n.pt",
                         height, width = frame.shape[:2]
                         frame_size[:] = [width, height]
                         regions = editor.pixels(width, height)
+                        inference_frame = frame.copy()
                         now = time.monotonic()
                         events = []
 
@@ -127,7 +128,7 @@ def run(port, preview_only=False, no_api=False, dwell=8.0, weights="yolov8n.pt",
                         person_boxes = []
                         if person_model is not None:
                             people_result = person_model.predict(
-                                frame, conf=0.45, classes=[0], verbose=False
+                                inference_frame, conf=0.45, classes=[0], verbose=False
                             )[0]
                             person_boxes = [
                                 tuple(int(v) for v in box)
@@ -152,7 +153,7 @@ def run(port, preview_only=False, no_api=False, dwell=8.0, weights="yolov8n.pt",
                         # PPE: requires separate weights trained with explicit missing labels.
                         ppe_findings = []
                         if ppe_model is not None:
-                            result = ppe_model.predict(frame, conf=0.45, verbose=False)[0]
+                            result = ppe_model.predict(inference_frame, conf=0.45, verbose=False)[0]
                             detections = zip(
                                 result.boxes.cls.cpu().numpy(),
                                 result.boxes.conf.cpu().numpy(),

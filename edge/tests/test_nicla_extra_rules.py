@@ -12,6 +12,7 @@ def test_missing_ppe_requires_explicit_label():
     assert extract_ppe_hazards(names, rows) == [("missing_helmet", (3, 3, 6, 6), .88)]
     assert supported_ppe_classes(["person", "safety vest", "helmet"]) == set()
     assert ppe_hazard_from_label("No-Hard-Hat") == "missing_helmet"
+    assert ppe_hazard_from_label("NO-Safety Vest") == "missing_vest"
 
 
 def test_proximity_debounce_and_invalid():

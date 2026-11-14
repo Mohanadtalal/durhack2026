@@ -7,6 +7,7 @@ PPE_ALIASES = {
     "missing_helmet": "missing_helmet", "bare_head": "missing_helmet",
     "no_hardhat": "missing_helmet", "no_hard_hat": "missing_helmet",
     "no_vest": "missing_vest", "without_vest": "missing_vest",
+    "no_safety_vest": "missing_vest",
     "missing_vest": "missing_vest", "no_safety_vest": "missing_vest",
 }
 
