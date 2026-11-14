@@ -1,105 +1,138 @@
 import React from 'react'
-import { ZONES, ACTIVE_WINDOW_MS, SEVERITY, STATE_WORD, topSeverity, friendly } from '../config'
+import { ACTIVE_WINDOW_MS, SEVERITY, topSeverity, friendly } from '../config'
 
-// Status per zone: highest severity among recent events; counts include all loaded events.
-export function zoneSummaries(events, now) {
-  const known = new Set(ZONES.map((z) => z.id))
-  const ids = [...ZONES.map((z) => z.id), ...new Set(events.map((e) => e.zone_id).filter((id) => !known.has(id)))]
+// Actual camera polygon IDs and names come from the Nicla preview service.
+// Historic incident IDs still appear when the camera is unavailable, but
+// are NEVER assigned fictional map coordinates.
+export function zoneSummaries(events, now, cameraZones = []) {
+  const known = new Set(cameraZones.map((zone) => zone.id))
+  const ids = [
+    ...cameraZones.map((zone) => zone.id),
+    ...new Set(events.map((event) => event.zone_id).filter((id) => !known.has(id))),
+  ]
   return ids.map((id) => {
-    const cfg = ZONES.find((z) => z.id === id)
-    const all = events.filter((e) => e.zone_id === id)
-    const recent = all.filter((e) => now - e.ts <= ACTIVE_WINDOW_MS)
-    return { id, cfg, label: cfg?.label || friendly(id), total: all.length, recent: recent.length, status: topSeverity(recent) }
+    const geometry = cameraZones.find((z) => z.id === id)
+    const all = events.filter((event) => event.zone_id === id)
+    const recent = all.filter((event) => now - event.ts <= ACTIVE_WINDOW_MS)
+    return {
+      id,
+      label: geometry?.label || friendly(id),
+      points: geometry?.points || null,
+      total: all.length,
+      recent: recent.length,
+      status: topSeverity(recent),
+    }
   })
 }
 
-
-const LABEL = { clear: 'All clear', info: 'Minor', warning: 'Warning', high: 'High alert', critical: 'Critical' }
-
-// Zone outlines on the plan (schematic). Keyed by zone id; `tag` is where the label sits, `dot` the status marker.
-const SHAPES = {
-  'cutting-station-a':   { pts: '46,44 290,42 294,170 50,176',  tag: [60, 58],  dot: [262, 150] },
-  'loading-zone-b':      { pts: '330,40 590,40 594,168 334,170', tag: [344, 54], dot: [566, 146] },
-  'working-at-height-c': { pts: '50,204 292,200 290,302 54,300', tag: [64, 218], dot: [264, 278] },
-  'general-area-d':      { pts: '332,200 592,198 590,304 336,304', tag: [346, 214], dot: [566, 280] },
+const LABELS = {
+  warning: 'Warning', high: 'High alert', critical: 'Critical',
+  info: 'Info',
 }
-const KEY = [['clear', 'Clear'], ['warning', 'Warning'], ['high', 'High alert'], ['critical', 'Critical']]
+const COLOUR = {
+  info: '#3d82cf', warning: '#eab308',
+  high: '#f97316', critical: '#e11d48',
+}
 
-export function SiteMap({ events, now, selectedZone, onSelectZone }) {
-  const zones = zoneSummaries(events, now)
-  const byId = Object.fromEntries(zones.map((z) => [z.id, z]))
-  const other = zones.filter((z) => !z.cfg)
-  const pick = (z, selected) => onSelectZone?.(selected ? 'all' : z.id)
-  const sel = selectedZone !== 'all' ? byId[selectedZone] : null
+function validPoints(points) {
+  return Array.isArray(points) && points.length >= 3 && points.length <= 12 &&
+    points.every((pair) =>
+      Array.isArray(pair) && pair.length === 2 &&
+      pair.every((n) => typeof n === 'number' && Number.isFinite(n) && n >= 0 && n <= 1))
+}
+
+export function SiteMap({ events, now, selectedZone = 'all', onSelectZone, cameraStatus }) {
+  const geometry = Array.isArray(cameraStatus?.zones)
+    ? cameraStatus.zones.filter((zone) => validPoints(zone.points))
+    : []
+  const summaries = zoneSummaries(events, now, geometry)
+  const selected = summaries.find((s) => s.id === selectedZone)
+  const mapped = summaries.filter((s) => s.points)
+  const unknown = summaries.filter((s) => !s.points)
+  const connected = Boolean(cameraStatus?.connected)
+  const choose = (id) => onSelectZone?.(selectedZone === id ? 'all' : id)
+
   return (
-    <div className="sitemap sp">
-      <svg viewBox="0 0 640 370" role="img" aria-label="Plan of the site showing the status of each work area">
-        <defs>
-          <pattern id="sp-hard" width="9" height="9" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><line x1="0" y1="0" x2="0" y2="9" className="sp-hardline" /></pattern>
-          <clipPath id="sp-clip"><rect width="640" height="370" rx="12" /></clipPath>
-        </defs>
-        <g clipPath="url(#sp-clip)">
-          <rect width="640" height="370" className="sp-base" />
-          {/* neighbouring plots and public road, kept very quiet */}
-          <g className="sp-neighbour"><rect x="-6" y="-6" width="640" height="14" /><rect x="618" y="8" width="30" height="300" /><rect x="-6" y="322" width="110" height="30" /><rect x="130" y="338" width="90" height="40" /></g>
-          <rect x="-6" y="334" width="660" height="40" className="sp-road" />
-          <text x="304" y="357" className="sp-roadname">Site access road</text>
-          {/* fence line and hard standing */}
-          <polygon points="28,26 608,20 614,316 332,322 28,314" className="sp-site" />
-          <polygon points="28,26 608,20 614,316 332,322 28,314" fill="url(#sp-hard)" />
-          <polygon points="28,26 608,20 614,316 332,322 28,314" className="sp-fence" />
-          {/* internal haul roads */}
-          <path d="M292 30V312M30 188H606" className="sp-haul" />
-          <path d="M292 30V312M30 188H606" className="sp-haulc" />
-          <g className="sp-gate" transform="translate(332 322)"><rect x="-16" y="-3" width="32" height="6" rx="1" /><text y="-9" textAnchor="middle">Gate</text></g>
-        </g>
-        {ZONES.map((z) => {
-          const sh = SHAPES[z.id]
-          if (!sh) return null
-          const s = byId[z.id]
-          const st = s?.status
-          const mood = st || 'clear'
-          const alert = st && st !== 'info'
-          const selected = selectedZone === z.id
-          const [tx, ty] = sh.tag
-          const [dx, dy] = sh.dot
-          const w = 14 + z.label.length * 7
-          return (
-            <g key={z.id} className={'sp-zone status-' + mood + (selected ? ' selected' : '')} tabIndex={0} role="button"
-               aria-label={z.label + ': ' + (st ? SEVERITY[st].label + ' alert' : 'clear') + '. Click to ' + (selected ? 'show all areas' : 'see its incidents')}
-               onClick={() => pick(z, selected)}
-               onKeyDown={(ev) => (ev.key === 'Enter' || ev.key === ' ') && pick(z, selected)}>
-              <polygon points={sh.pts} className="sp-poly" />
-              <g className="sp-tag" transform={`translate(${tx} ${ty})`}>
-                <rect width={Math.max(w, 112)} height="40" rx="6" className="sp-tag-bg" />
-                <text x="10" y="16" className="sp-tag-name">{z.label}</text>
-                <circle cx="14" cy="29" r="4" className="sp-tag-dot" />
-                <text x="24" y="33" className="sp-tag-state">{LABEL[mood]}</text>
-              </g>
-              <g transform={`translate(${dx} ${dy})`} className="sp-marker">
-                {alert && <circle r="11" className="sp-ring" />}
-                <circle r="10" className="sp-mk" />
-                {st && <text y="4" textAnchor="middle" className="sp-mk-n">{s.recent || ''}</text>}
-              </g>
-            </g>
-          )
-        })}
-        <g className="sp-key" transform="translate(12 339)" aria-hidden="true">
-          <rect width="268" height="26" rx="6" className="sp-key-bg" />
-          {KEY.map(([k, t], i) => <g key={k} transform={`translate(${10 + i * 66} 13)`} className={'status-' + k}><circle r="4.5" className="sp-key-dot" /><text x="9" y="4">{t}</text></g>)}
-        </g>
-        <text x="630" y="357" textAnchor="end" className="sp-attr">Schematic plan, not to scale</text>
-      </svg>
-      {sel && (
-        <div className="gm-card" role="status">
-          <div><b>{sel.label}</b><span className={'gm-badge st-' + (sel.status || 'clear')}>{LABEL[sel.status || 'clear']}</span></div>
-          <p>{sel.total ? sel.total + (sel.total === 1 ? ' incident' : ' incidents') + ' recorded, ' + sel.recent + ' in the last 15 minutes.' : 'No incidents recorded here.'}</p>
-          <button className="link" onClick={() => onSelectZone?.('all')}>Clear selection</button>
-        </div>
-      )}
-      {other.length > 0 && (
-        <p className="other-zones">Areas reporting that are not drawn on the map: {other.map((z) => z.label + ' (' + z.total + ')').join(', ')}</p>
-      )}
+    <div className="site-geometry">
+      <div className={'zone-status ' + (connected ? 'zone-online' : 'zone-offline')}
+           role="status">
+        {connected ? 'Camera publishing recent frames' : 'No verified live camera feed'}
+        <span>{geometry.length} configured camera {geometry.length === 1 ? 'zone' : 'zones'}</span>
+      </div>
+      {mapped.length > 0
+        ? <svg className="camera-zone-map" viewBox="0 0 640 370" role="img"
+            aria-label="Actual saved polygon areas in the camera image; schematic camera coordinates">
+            <rect x="0" y="0" width="640" height="370" rx="10" fill="#14253b"/>
+            {Array.from({ length: 7 }, (_, i) =>
+              <line key={'v' + i} x1={20 + i * 100} y1="16" x2={20 + i * 100}
+                y2="354" stroke="#ffffff14" />)}
+            {Array.from({ length: 4 }, (_, i) =>
+              <line key={'h' + i} x1="10" y1={20 + i * 100} x2="630"
+                y2={20 + i * 100} stroke="#ffffff14" />)}
+            {mapped.map((z, i) => {
+              const pts = z.points.map(([x, y]) =>
+                [Math.round(12 + x * 616), Math.round(14 + y * 340)])
+              const fill = COLOUR[z.status] || '#2bb7a2'
+              const first = pts[0]
+              return <g key={z.id} role="button" tabIndex={0}
+                  aria-label={z.label + ': ' +
+                    (z.recent ? z.recent + ' recent incidents' : 'no recent reports')}
+                  onClick={() => choose(z.id)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault()
+                      choose(z.id)
+                    }
+                  }}
+                  style={{ cursor: 'pointer', opacity: selectedZone === 'all' || selectedZone === z.id ? 1 : .48 }}>
+                  <polygon points={pts.map((p) => p.join(',')).join(' ')}
+                    fill={fill} fillOpacity={selectedZone === z.id ? .4 : .22}
+                    stroke={fill} strokeWidth={selectedZone === z.id ? 4 : 2}/>
+                  <text x={first[0] + 7} y={Math.max(28, first[1] - 8)}
+                    fill="#fff" fontSize="15" fontWeight="600">
+                    {z.label.length > 23 ? 'Zone ' + (i + 1) : z.label}
+                  </text>
+                </g>
+            })}
+            <text x="16" y="354" fill="#bbc7d6" fontSize="12">
+              Camera-relative geometry — not a surveyed site plan
+            </text>
+          </svg>
+        : <div className="zone-unmapped">
+            <b>No camera zone polygons available</b>
+            <p>Connect the Nicla preview server and mark restricted zones in the
+              camera window to see their real positions. Vehicle–worker prediction
+              works separately and does not require marking zones.</p>
+          </div>}
+      <div className="real-zone-list">
+        {summaries.map((z) =>
+          <button key={z.id} type="button"
+            className={'zone-list-row ' + (selectedZone === z.id ? 'zone-list-selected' : '')}
+            onClick={() => choose(z.id)}>
+            <span><b>{z.label}</b><small>{z.points
+              ? 'Configured camera region'
+              : 'Incident-only area · location not mapped'}</small></span>
+            <span className="zone-activity">
+              {z.recent > 0
+                ? (LABELS[z.status] || 'Reported') + ' · ' + z.recent + ' recent'
+                : z.total > 0 ? z.total + ' historical reports' : 'No recent reports'}
+            </span>
+          </button>
+        )}
+        {summaries.length === 0 &&
+          <p className="zone-footnote">No configured areas or incident reports yet.</p>}
+      </div>
+      {!connected && <p className="zone-footnote">
+        Camera offline or not configured. “No recent reports” never means the site is safe.
+      </p>}
+      {selected && <p className="zone-footnote">
+        Selected: <strong>{selected.label}</strong>. {selected.total} recorded
+        {selected.total === 1 ? ' incident' : ' incidents'}.
+        <button className="link" onClick={() => onSelectZone?.('all')}>Clear selection</button>
+      </p>}
+      {unknown.length > 0 && mapped.length > 0 &&
+        <p className="zone-footnote">Some recorded incidents have no known camera polygon
+          and are listed separately; no position has been invented.</p>}
     </div>
   )
 }
