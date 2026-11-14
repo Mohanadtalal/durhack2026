@@ -113,7 +113,7 @@ def test_diagnostics_stationary_car_and_approach_candidate():
     assert "CAR NOT MOVING TOWARD PERSON" in monitor.debug_summary
 
     monitor.reset()
-    for i in range(4):
+    for i in range(5):
         monitor.update([(10, 2, box(35 + i * 35, 180)),
                         (20, 0, box(265, 180))],
                        20 + i * .25, 320, 240, road_zones=lane())

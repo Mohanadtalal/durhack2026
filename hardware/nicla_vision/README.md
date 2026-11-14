@@ -360,3 +360,68 @@ connected Nicla and does **not** send red-LED warnings or events to the
 backend. Even with full-resolution input, busy crossing footage may have
 **no** paths meeting the approach criteria. It is not evidence that
 an actual collision was imminent.
+
+## Road-aware vehicle/person prediction (safer experimental version)
+
+The initial version sometimes warned when a car was driving past someone
+standing on the far-side **pavement**. At 4.4s and 44.7s in the urban crossing
+demo, the image-space vehicle and person positions appeared to converge, but
+the pedestrians were waiting near the kerb. No real collision was established.
+
+**The refined predictor now REQUIRES a manually marked vehicle/crossing
+conflict polygon. With no polygon, it will NOT raise car/person warnings.**
+This is intentional: 2D motion alone cannot establish the road's location.
+Do not mark the pavement or the waiting area. Cover the relevant traffic
+lane and pedestrian crossing where a pedestrian could actually meet a vehicle.
+
+The detector now uses a short **multi-frame least-squares motion trend**
+instead of estimating speed from a single pair of frames. It also requires
+stable track IDs, path convergence inside the SAME marked road area, and:
+- the pedestrian's box footpoint is already inside that area, **or**
+- the pedestrian is moving into that area based on several frames of
+  meaningful movement (not minor bounding-box jitter).
+
+These are heuristics, not metric world-space tracking, 3D depth, validated
+time-to-collision, or a guarantee against false positives/false negatives.
+
+### 1. Mark the road directly on the downloaded colour MP4
+
+```powershell
+python -m edge.nicla_video_test --video data/pedestrians.mp4 --mark-road --motion-debug --save data/road_aware_demo.mp4
+```
+
+A paused first video frame opens. **Left-click 3–12 points** outlining
+the relevant road/crossing *where a collision could occur*, avoiding the
+far-side waiting pavement. Press **S** to save. Press **U** to undo a point;
+**R** clears existing road polygons; **Q** cancels. The script then
+restarts the source video, uses those saved road areas to filter predictions,
+and saves an annotated MP4 (magenta road outlines). Polygons are stored in
+`data/video_road_conflicts.json` and persist between runs.
+
+Later runs can omit `--mark-road`:
+
+```powershell
+python -m edge.nicla_video_test --video data/pedestrians.mp4 --motion-debug --save data/road_aware_demo.mp4
+```
+
+### 2. Mark the conflict area in live Nicla video
+
+```powershell
+python -m edge.nicla_detector --port COM9 --no-api --predictive --motion-debug
+```
+
+In the camera window press **L** to draw a road/crossing area, left-click
+3–12 corners, then press **S** to save. Road conflict areas show in
+**magenta** and persist to `data/nicla_road_conflicts.json`. Keep the Nicla
+camera fixed after drawing; moving it invalidates the screen-space polygons.
+
+- **E → clicks → S**: creates an ordinary restricted/danger zone as before.
+- **L → clicks → S**: creates a separate **vehicle conflict area**.
+- **R**: clears ordinary danger zones only.
+- **K**: clears road conflict polygons only.
+- **U**: undo a corner; **C**: cancel unfinished edit; **Q**: quit.
+
+Road polygons **do not** themselves trigger restricted-zone alerts.
+Only confirmed moving-car / pedestrian conflict predictions trigger that
+kind of hazard. As before, the system is a demo and must not be used for
+real collision prevention or tested with real near misses.
