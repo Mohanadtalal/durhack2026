@@ -130,7 +130,7 @@ export default function App() {
 
         {view === 'overview' && (<>
           <div className="grid two">
-            <Panel tone="blue" title="Site plan" note="Each box is a work area, coloured by its latest alert. Click one to see what happened there.">
+            <Panel tone="blue" title="Camera zones" note="Actual saved camera regions when connected; unmapped incidents remain listed.">
               <SiteMap events={events} now={now} selectedZone={filters.zone} onSelectZone={selectZone} cameraStatus={cameraStatus} />
             </Panel>
             <Panel tone="violet" title="Latest incidents" note="Newest first. Click one for the full story." action={<button className="icon-btn" onClick={refresh} aria-label="Refresh now"><RefreshCcw size={17} /></button>}>
@@ -162,7 +162,7 @@ export default function App() {
 
         {view === 'zones' && (
           <div className="grid two">
-            <Panel title="Site plan" note="Click a box to see only that area.">
+            <Panel title="Camera zones" note="Select an actual camera region or an incident-only area.">
               <SiteMap events={events} now={now} selectedZone={filters.zone} onSelectZone={selectZone} cameraStatus={cameraStatus} />
             </Panel>
             <Panel title={filters.zone === 'all' ? 'Incidents by zone' : 'Incidents in selected zone'}>

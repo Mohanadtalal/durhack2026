@@ -20,8 +20,16 @@ export function CameraFeed({ latest, now, cameraStatus, cameraError }) {
     const t = setInterval(() => setTick((x) => x + 1), 2000)
     return () => clearInterval(t)
   }, [])
-  const src = !URL_OK ? '' : MODE === 'snapshot' ? URL_OK + (URL_OK.includes('?') ? '&' : '?') + 't=' + tick : URL_OK
-  const connected = Boolean(URL_OK && cameraStatus?.connected) && !failed
+  const src = !URL_OK ? '' : URL_OK + (URL_OK.includes('?') ? '&' : '?') + 't=' + tick
+  const statusConnected = Boolean(URL_OK && cameraStatus?.connected)
+  // Retry if an MJPEG connection was interrupted, without claiming it is live
+  // merely because a URL was configured.
+  useEffect(() => {
+    if (!failed || !statusConnected) return
+    const timer = setTimeout(() => { setFailed(false); setTick((n) => n + 1) }, 3000)
+    return () => clearTimeout(timer)
+  }, [failed, statusConnected])
+  const connected = statusConnected && !failed
   const recent = latest && now - latest.ts < 60000
 
   return (
