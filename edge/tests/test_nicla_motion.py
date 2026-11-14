@@ -107,7 +107,7 @@ def test_diagnostics_reveal_missing_car_or_person():
 
 def test_diagnostics_stationary_car_and_approach_candidate():
     monitor = PredictiveMotionMonitor()
-    for i in range(3):
+    for i in range(4):
         monitor.update([(10, 2, box(70, 180)), (20, 0, box(270, 180))],
                        10 + i * .25, 320, 240, road_zones=lane())
     assert "CAR NOT MOVING TOWARD PERSON" in monitor.debug_summary

@@ -11,6 +11,7 @@ from pathlib import Path
 
 from .nicla_motion import PredictiveMotionMonitor
 from .nicla_recording import TimedFrameRecorder
+from .zone_editor import ZoneEditor
 
 
 def frame_step(source_fps, analysis_fps):
@@ -22,8 +23,75 @@ def frame_step(source_fps, analysis_fps):
     return max(1, int(round(source_fps / analysis_fps)))
 
 
+
+def mark_conflict_area(first_frame, path):
+    """Let the operator draw a road/crossing polygon on original video.
+
+    Only saves deliberate user clicks, no fabricated road segmentation.
+    Use the first video frame as the coordinate basis, and persist
+    normalized polygons in a separate (Git-ignored) JSON file.
+    """
+    import cv2
+    import numpy as np
+
+    editor = ZoneEditor(path)
+    editor.begin()
+    window = "Mark road conflict area | Click corners S=save U=undo R=clear Q=cancel"
+    height, width = first_frame.shape[:2]
+
+    def mouse(event, x, y, flags, userdata):
+        if event == cv2.EVENT_LBUTTONDOWN:
+            editor.add_corner(x, y, width, height)
+
+    cv2.namedWindow(window, cv2.WINDOW_NORMAL)
+    cv2.resizeWindow(window, min(width, 1100), min(height, 650))
+    cv2.setMouseCallback(window, mouse)
+    print("[ROAD] Click 3-12 corners around the VEHICLE TRAVEL/CROSSING AREA.")
+    print("[ROAD] S save | U undo | R clear all road regions | Q cancel.")
+    try:
+        while True:
+            display = first_frame.copy()
+            for i, polygon in enumerate(editor.pixels(width, height)):
+                cv2.polylines(display, [np.asarray(polygon, dtype=np.int32)],
+                              True, (255, 60, 190), 3)
+                px, py = polygon[0]
+                cv2.putText(display, f"CONFLICT AREA {i+1}",
+                            (px, max(25, py - 8)),
+                            cv2.FONT_HERSHEY_SIMPLEX, .60, (255, 60, 190), 2)
+            draft = editor.draft_pixels(width, height)
+            if len(draft) >= 2:
+                cv2.polylines(display, [np.asarray(draft, dtype=np.int32)],
+                              False, (0, 255, 255), 2)
+            for x, y in draft:
+                cv2.circle(display, (x, y), 5, (0, 255, 255), -1)
+            cv2.putText(display, "Click ROAD/CROSSING corners | S save U undo R clear Q cancel",
+                        (15, 28), cv2.FONT_HERSHEY_SIMPLEX,
+                        .56, (255, 255, 255), 2)
+            cv2.imshow(window, display)
+            key = cv2.waitKey(25) & 0xFF
+            if key in (ord("q"), ord("Q"), 27):
+                print("[ROAD] Cancelled; existing road areas unchanged.")
+                break
+            if key in (ord("u"), ord("U")):
+                editor.undo()
+            elif key in (ord("r"), ord("R")):
+                editor.reset()
+                editor.begin()
+                print("[ROAD] Removed previously saved road regions.")
+            elif key in (ord("s"), ord("S")):
+                try:
+                    if editor.save():
+                        print("[ROAD] Saved road area to", editor.path)
+                        break
+                except (OSError, ValueError) as exc:
+                    print("[ROAD] Invalid polygon:", exc)
+    finally:
+        cv2.destroyWindow(window)
+    return editor
+
 def run(video, weights="yolov8n.pt", conf=0.25, analysis_fps=8.0,
-        motion_debug=False, save=None):
+        motion_debug=False, save=None, road_file="data/video_road_conflicts.json",
+        mark_road=False):
     # Keep OpenCV and YOLO optional so unit tests can run in lightweight CI.
     import cv2
     from ultralytics import YOLO
@@ -39,6 +107,7 @@ def run(video, weights="yolov8n.pt", conf=0.25, analysis_fps=8.0,
     capture = cv2.VideoCapture(str(source))
     if not capture.isOpened():
         raise RuntimeError("Could not open input video: " + str(source))
+    road_editor = ZoneEditor(road_file)
     writer = None
     recorder = None
     preview = "SiteGuardian: Car-person video diagnostics (Q to quit)"
@@ -50,6 +119,17 @@ def run(video, weights="yolov8n.pt", conf=0.25, analysis_fps=8.0,
         stride = frame_step(fps, analysis_fps)
         print(f"[VIDEO] {source} | source {fps:.1f} FPS | processing every {stride} frames")
         print("[VIDEO] Full-colour frames; no Nicla connected, no LED/API events.")
+        if mark_road:
+            ok, first_frame = capture.read()
+            if not ok:
+                raise RuntimeError("Cannot read a frame for road configuration")
+            road_editor = mark_conflict_area(first_frame, road_file)
+            if not capture.set(cv2.CAP_PROP_POS_FRAMES, 0):
+                raise RuntimeError("Could not reset MP4 after configuring road")
+        print("[ROAD] Loaded", len(road_editor.zones), "marked crossing/conflict area(s)")
+        if not road_editor.zones:
+            print("[ROAD] Vehicle/person alerts DISABLED until you define road/crossing.")
+            print("[ROAD] Run again with --mark-road to click a road polygon.")
         print("[MODEL] Loading:", weights)
         model = YOLO(weights)
         monitor = PredictiveMotionMonitor()
@@ -91,7 +171,18 @@ def run(video, weights="yolov8n.pt", conf=0.25, analysis_fps=8.0,
                 cv2.putText(frame, f"{label} #{ident if ident is not None else '?'}",
                             (x1, max(22, y1 - 5)), cv2.FONT_HERSHEY_SIMPLEX,
                             0.65, tint, 2)
-            alerts = monitor.update(items, timestamp, width, height)
+            road_regions = road_editor.pixels(width, height)
+            alerts = monitor.update(
+                items, timestamp, width, height,
+                road_zones=[(i + 1, poly) for i, poly in enumerate(road_regions)])
+            for i, polygon in enumerate(road_regions):
+                import numpy as np
+                cv2.polylines(frame, [np.asarray(polygon, dtype=np.int32)],
+                              True, (255, 60, 190), 3)
+                x, y = polygon[0]
+                cv2.putText(frame, f"ROAD CONFLICT {i + 1}",
+                            (x, max(30, y - 8)),
+                            cv2.FONT_HERSHEY_SIMPLEX, .52, (255, 60, 190), 2)
             for alert in alerts:
                 if alert.hazard_type == "vehicle_approaching_person":
                     warning_count += 1
@@ -176,10 +267,15 @@ def main():
     parser.add_argument("--motion-debug", action="store_true",
                         help="Show and print reasons car/person prediction is not firing")
     parser.add_argument("--save", help="Optional annotated output MP4")
+    parser.add_argument("--road-file", default="data/video_road_conflicts.json",
+                        help="Saved road/crossing polygons in original video coordinates")
+    parser.add_argument("--mark-road", action="store_true",
+                        help="Click corners of vehicle travel/crossing area on video first frame")
     args = parser.parse_args()
     run(args.video, weights=args.weights, conf=args.conf,
         analysis_fps=args.analysis_fps, motion_debug=args.motion_debug,
-        save=args.save)
+        save=args.save, road_file=args.road_file,
+        mark_road=args.mark_road)
 
 
 if __name__ == "__main__":
