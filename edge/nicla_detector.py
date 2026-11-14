@@ -19,6 +19,7 @@ from .nicla_extra_rules import (
     PPE_HAZARDS, ProximityAlert, extract_ppe_hazards, supported_ppe_classes,
 )
 from .nicla_geometry import DebouncedOccupancy
+from .nicla_recording import TimedFrameRecorder
 from .nicla_usb import NiclaProtocolError, NiclaUSB
 from .zone_editor import DEFAULT_ZONE_FILE, ZoneEditor, person_in_polygon
 from .zone_rules import ZoneMonitor
@@ -254,13 +255,15 @@ def run(port, preview_only=False, no_api=False, dwell=8.0, weights="yolov8n.pt",
                             if recording is None:
                                 target = Path(record_path)
                                 target.parent.mkdir(parents=True, exist_ok=True)
-                                recording = cv2.VideoWriter(
+                                writer = cv2.VideoWriter(
                                     str(target), cv2.VideoWriter_fourcc(*"mp4v"),
                                     10.0, (width, height)
                                 )
-                                if not recording.isOpened():
+                                if not writer.isOpened():
+                                    writer.release()
                                     raise RuntimeError("Could not open MP4 output: " + str(target))
-                            recording.write(frame)
+                                recording = TimedFrameRecorder(writer, fps=10.0)
+                            recording.write(frame, at=time.monotonic())
 
                         cv2.imshow(window, frame)
                         key = cv2.waitKey(1) & 0xFF
@@ -294,6 +297,8 @@ def run(port, preview_only=False, no_api=False, dwell=8.0, weights="yolov8n.pt",
             except (NiclaProtocolError, OSError) as exc:
                 if not running:
                     break
+                if recording is not None:
+                    recording.pause(time.monotonic())
                 print("[USB] Connection lost:", exc, "- retrying every", retry_seconds, "seconds")
                 # State is unknown after a broken link. Re-arm detection on reconnect.
                 warning_active = False
@@ -310,7 +315,8 @@ def run(port, preview_only=False, no_api=False, dwell=8.0, weights="yolov8n.pt",
     finally:
         if recording is not None:
             recording.release()
-            print("[RECORD] Saved video to", record_path)
+            print(f"[RECORD] Saved {recording.duration_seconds:.1f}s of video "
+                  f"({recording.frames_written} frames) to {record_path}")
         cv2.destroyAllWindows()
         if not no_api:
             try:
