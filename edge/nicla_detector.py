@@ -20,6 +20,7 @@ from .nicla_extra_rules import (
 )
 from .nicla_geometry import DebouncedOccupancy
 from .nicla_recording import TimedFrameRecorder
+from .nicla_motion import PredictiveMotionMonitor
 from .nicla_usb import NiclaProtocolError, NiclaUSB
 from .zone_editor import DEFAULT_ZONE_FILE, ZoneEditor, person_in_polygon
 from .zone_rules import ZoneMonitor
@@ -27,7 +28,7 @@ from .zone_rules import ZoneMonitor
 
 def run(port, preview_only=False, no_api=False, dwell=8.0, weights="yolov8n.pt",
         zone_file=DEFAULT_ZONE_FILE, ppe_weights=None, proximity_mm=None,
-        record_path=None, retry_seconds=2.0):
+        record_path=None, retry_seconds=2.0, predictive=False, sharp_zone_ids=()):
     import cv2
     import numpy as np
     from .client import send_event, flush_pending
@@ -36,6 +37,12 @@ def run(port, preview_only=False, no_api=False, dwell=8.0, weights="yolov8n.pt",
         raise ValueError("retry_seconds must be at least 0.5")
     if preview_only and ppe_weights:
         raise ValueError("Remove --preview-only when using a PPE model.")
+    if preview_only and predictive:
+        raise ValueError("Predictive motion analysis requires YOLO; remove --preview-only.")
+    if any(index < 1 for index in sharp_zone_ids):
+        raise ValueError("Sharp zone indices start at 1.")
+    if sharp_zone_ids and not predictive:
+        raise ValueError("Marking a sharp zone requires --predictive.")
 
     person_model = None
     ppe_model = None
@@ -54,6 +61,8 @@ def run(port, preview_only=False, no_api=False, dwell=8.0, weights="yolov8n.pt",
         print("[PPE] Supported missing-equipment classes:", sorted(classes))
 
     editor = ZoneEditor(zone_file)
+    predictor = PredictiveMotionMonitor() if predictive else None
+    sharp_zone_ids = set(sharp_zone_ids)
     occupancies = [DebouncedOccupancy(2) for _ in editor.zones]
     monitors = [ZoneMonitor(dwell_seconds=dwell) for _ in editor.zones]
     ppe_states = {kind: DebouncedOccupancy(2) for kind in PPE_HAZARDS}
@@ -95,6 +104,12 @@ def run(port, preview_only=False, no_api=False, dwell=8.0, weights="yolov8n.pt",
     print("Opening Nicla Vision:", port, "| close OpenMV IDE first")
     print("Keys: E add zone, left-click corners, S save, U undo, C cancel, R clear, Q quit.")
     print("Loaded", len(editor.zones), "zones from", editor.path)
+    if predictor:
+        print("[PREDICT] Tracking persons and cars, warning on converging image paths.")
+        if sharp_zone_ids:
+            print("[PREDICT] Manually marked sharp-prop zones:", sorted(sharp_zone_ids))
+            print("[PREDICT] This does NOT detect sharp objects or verify walking backward.")
+        print("[PREDICT] Use a fixed Nicla camera. Predictions are not physical collision distances.")
     if proximity is not None:
         print("[ToF] Forward object alert threshold:", proximity.threshold_mm, "mm")
         print("[ToF] Requires updated main.py on Nicla. Does not measure person distance.")
@@ -125,18 +140,49 @@ def run(port, preview_only=False, no_api=False, dwell=8.0, weights="yolov8n.pt",
                         now = time.monotonic()
                         events = []
 
-                        # Person detector: existing COCO YOLO classes=[0].
+                        # Track people and cars only when predictive mode is enabled.
+                        # Standard person-only detection is unchanged by default.
                         person_boxes = []
+                        tracked = []
                         if person_model is not None:
-                            people_result = person_model.predict(
-                                inference_frame, conf=0.45, classes=[0], verbose=False
-                            )[0]
-                            person_boxes = [
-                                tuple(int(v) for v in box)
-                                for box in people_result.boxes.xyxy.cpu().numpy()
-                            ]
-                            for x1, y1, x2, y2 in person_boxes:
-                                cv2.rectangle(frame, (x1, y1), (x2, y2), (50, 220, 120), 2)
+                            if predictor is not None:
+                                people_result = person_model.track(
+                                    inference_frame, persist=True, tracker="bytetrack.yaml",
+                                    conf=0.35, classes=[0, 2], verbose=False
+                                )[0]
+                                boxes = people_result.boxes
+                                xyxy = boxes.xyxy.cpu().numpy()
+                                class_ids = boxes.cls.cpu().numpy()
+                                ids = (boxes.id.cpu().numpy() if boxes.id is not None
+                                       else [None] * len(xyxy))
+                                for box, class_id, track_id in zip(xyxy, class_ids, ids):
+                                    coords = tuple(int(v) for v in box)
+                                    kind = int(class_id)
+                                    ident = int(track_id) if track_id is not None else None
+                                    if ident is not None:
+                                        tracked.append((ident, kind, coords))
+                                    if kind == 0:
+                                        person_boxes.append(coords)
+                                    x1, y1, x2, y2 = coords
+                                    color = (50, 220, 120) if kind == 0 else (0, 165, 255)
+                                    cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+                                    kind_name = "PERSON" if kind == 0 else "CAR"
+                                    cv2.putText(
+                                        frame, f"{kind_name} #{ident if ident is not None else '?'}",
+                                        (x1, max(20, y1 - 4)), cv2.FONT_HERSHEY_SIMPLEX,
+                                        .35, color, 1,
+                                    )
+                            else:
+                                people_result = person_model.predict(
+                                    inference_frame, conf=0.45, classes=[0], verbose=False
+                                )[0]
+                                person_boxes = [
+                                    tuple(int(v) for v in box)
+                                    for box in people_result.boxes.xyxy.cpu().numpy()
+                                ]
+                                for x1, y1, x2, y2 in person_boxes:
+                                    cv2.rectangle(frame, (x1, y1), (x2, y2),
+                                                  (50, 220, 120), 2)
 
                         if len(regions) != len(occupancies):
                             raise RuntimeError("Zone tracker and saved zones differ.")
@@ -195,11 +241,34 @@ def run(port, preview_only=False, no_api=False, dwell=8.0, weights="yolov8n.pt",
                             if cleared:
                                 print("[ToF] Forward proximity cleared")
 
+                        # Predictive hazards are optional. Sharp prop locations
+                        # are operator-marked existing zones, NOT AI-recognised tools.
+                        if predictor is not None:
+                            marked = [(i + 1, polygon) for i, polygon in enumerate(regions)
+                                      if i + 1 in sharp_zone_ids]
+                            for prediction in predictor.update(
+                                    tracked, now, width, height, sharp_zones=marked):
+                                if prediction.hazard_type == "vehicle_approaching_person":
+                                    zone_id = f"nicla-car-{prediction.source_id}"
+                                    extra = {"vehicle_track_id": prediction.source_id,
+                                             "person_track_id": prediction.target_id}
+                                else:
+                                    zone_id = f"nicla-zone-{prediction.target_id}"
+                                    extra = {"person_track_id": prediction.source_id,
+                                             "manually_marked_sharp_zone": prediction.target_id}
+                                events.append((
+                                    prediction.hazard_type, zone_id, "warning",
+                                    {**extra, "screen_plane_prediction": True,
+                                     "not_calibrated": True,
+                                     "horizon_seconds": round(prediction.seconds_ahead, 2)},
+                                ))
+
                         # Red LED is driven by ANY configured hazard source.
                         in_zone = any(state.inside for state in occupancies)
                         ppe_alert = any(state.inside for state in ppe_states.values())
                         tof_alert = proximity.near if proximity is not None else False
-                        should_warn = in_zone or ppe_alert or tof_alert
+                        predicted_alert = bool(predictor.active) if predictor else False
+                        should_warn = in_zone or ppe_alert or tof_alert or predicted_alert
                         if should_warn != warning_active:
                             nicla.set_warning(should_warn)
                             warning_active = should_warn
@@ -214,12 +283,24 @@ def run(port, preview_only=False, no_api=False, dwell=8.0, weights="yolov8n.pt",
                             cv2.polylines(frame, [np.array(region, dtype=np.int32)], True, color, 2)
                             label_x = min(x for x, y in region)
                             label_y = min(y for x, y in region)
-                            cv2.putText(frame, f"ZONE {i + 1}",
+                            title = (f"MARKED SHARP ZONE {i + 1}"
+                                     if i + 1 in sharp_zone_ids else f"ZONE {i + 1}")
+                            cv2.putText(frame, title,
                                         (max(4, label_x), max(46, label_y - 7)),
-                                        cv2.FONT_HERSHEY_SIMPLEX, .47, color, 2)
+                                        cv2.FONT_HERSHEY_SIMPLEX, .40, color, 2)
                         if not regions:
                             cv2.putText(frame, "NO ZONES - press E to add", (5, 40),
                                         cv2.FONT_HERSHEY_SIMPLEX, .40, (0, 255, 255), 1)
+                        if predictor is not None:
+                            for n, threat in enumerate(predictor.active[:2]):
+                                if threat.hazard_type == "vehicle_approaching_person":
+                                    label = f"APPROACH: CAR {threat.source_id} -> PERSON {threat.target_id}"
+                                else:
+                                    label = f"APPROACH: PERSON {threat.source_id} -> SHARP ZONE {threat.target_id}"
+                                cv2.putText(
+                                    frame, label, (4, height - 34 - 15 * n),
+                                    cv2.FONT_HERSHEY_SIMPLEX, .37, (0, 0, 255), 2
+                                )
                         if editor.editing:
                             draft = editor.draft_pixels(width, height)
                             if len(draft) >= 2:
@@ -305,6 +386,12 @@ def run(port, preview_only=False, no_api=False, dwell=8.0, weights="yolov8n.pt",
                 occupancies = [DebouncedOccupancy(2) for _ in editor.zones]
                 monitors = [ZoneMonitor(dwell_seconds=dwell) for _ in editor.zones]
                 ppe_states = {kind: DebouncedOccupancy(2) for kind in PPE_HAZARDS}
+                if predictor is not None:
+                    predictor.reset()
+                    # Tracker IDs must not persist across separate USB sessions.
+                    if person_model is not None and getattr(person_model, "predictor", None):
+                        for tracker in getattr(person_model.predictor, "trackers", []):
+                            tracker.reset()
                 proximity = ProximityAlert(proximity_mm) if proximity_mm is not None else None
                 distance_mm = None
                 deadline = time.monotonic() + retry_seconds
@@ -337,11 +424,15 @@ def main():
     parser.add_argument("--proximity-mm", type=int, help="Optional forward ToF alert threshold, 50-4000 mm")
     parser.add_argument("--record", help="Record annotated video to an MP4 path, e.g. data/demo.mp4")
     parser.add_argument("--retry-seconds", type=float, default=2.0, help="Retry USB after disconnect")
+    parser.add_argument("--predictive", action="store_true",
+                        help="Track cars and people to warn on converging image-plane paths")
+    parser.add_argument("--sharp-zone", type=int, action="append", default=[],
+                        help="Saved zone index containing a manually marked sharp prop; repeatable")
     args = parser.parse_args()
     try:
         run(args.port, args.preview_only, args.no_api, args.dwell, args.weights,
             args.zone_file, args.ppe_weights, args.proximity_mm,
-            args.record, args.retry_seconds)
+            args.record, args.retry_seconds, args.predictive, args.sharp_zone)
     except KeyboardInterrupt:
         print("[EXIT] Interrupted by user")
 
