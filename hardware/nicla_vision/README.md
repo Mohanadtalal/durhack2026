@@ -128,9 +128,14 @@ python -m edge.nicla_detector --port COM9 --no-api --dwell 5 --record data/siteg
 ```
 
 An annotated MP4 is saved after quitting with Q. The file remains on the
-laptop and is Git-ignored. VideoWriter uses an approximately 10 FPS timeline;
-if optional PPE inference slows processing significantly, video duration may
-differ from wall time. Obtain permission before recording identifiable people.
+laptop and is Git-ignored. MP4 files still use 10 FPS, but timestamps now pace
+the recording: at 4–5 FPS capture/inference speed, previous frames repeat to
+preserve approximate real-time playback duration. If camera capture exceeds
+10 FPS, extra input frames are skipped. This does **not** increase detection
+FPS or interpolate motion. USB-disconnected time is excluded, and unexpected
+stalls are limited to 2 seconds of frozen video. On quit, the terminal prints
+the output duration and number of recorded frames.
+Obtain permission before recording identifiable people.
 The physical Nicla LED is not visible in the video unless filmed separately.
 
 ### 2. Auto-reconnect after USB dropouts
