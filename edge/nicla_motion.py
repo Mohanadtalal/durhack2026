@@ -58,11 +58,13 @@ def _polygon_distance(p, polygon):
 
 
 class PredictiveMotionMonitor:
-    """Detect screen-space path convergence using consistent tracked IDs.
+    """Detect candidate vehicle/worker screen-space conflicts autonomously.
 
-    A vehicle must be visibly moving *toward* a person, not just standing near
-    them. Sharp zones are manually selected saved polygons, not automatically
-    recognized sharp tools. Both require consecutive positive observations.
+    Car, bus and truck approaches need NO manually marked area. A separate
+    road polygon remains an optional extra filter for sites that want one.
+    Multi-frame track trends and tighter ground-contact checks reject many
+    perspective-induced near misses. No 3D distance or physical TTC claimed.
+    Sharp props still need manual zones until a trained model is available.
     """
 
     def __init__(self, horizon_seconds=2.0, confirm_frames=2):
@@ -163,8 +165,6 @@ class PredictiveMotionMonitor:
         Mirrors the screening conditions in _vehicle_person; use for
         diagnostics only, never to weaken or override safety thresholds.
         """
-        if not road_polygons:
-            return "NO ROAD CONFLICT AREA MARKED"
         if vehicle.samples < 4 or person.samples < 4:
             return "WAITING FOR STABLE TRACK IDS"
         dx = person.xy[0] - vehicle.xy[0]
@@ -186,19 +186,25 @@ class PredictiveMotionMonitor:
         if ahead > self.horizon:
             return "APPROACH OUTSIDE 2 SECOND HORIZON"
         closest = hypot(dx - relative_x * ahead, dy - relative_y * ahead)
-        if closest > 0.11:
+        # Compare projected ground-contact points, not bounding-box overlap:
+        # a vehicle passing in front of a worker at a different image depth
+        # can overlap the person's entire bbox without sharing their ground.
+        future_dy = abs(dy - relative_y * ahead)
+        if future_dy > 0.045:
+            return "FOOTPOINT DEPTH MISMATCH"
+        if closest > 0.055:
             return "PROJECTED PATHS TOO FAR APART"
-        return self._road_status(vehicle, person, ahead, road_polygons)
+        if road_polygons:
+            return self._road_status(vehicle, person, ahead, road_polygons)
+        return "AUTOMATIC PATH CONFLICT - CONFIRMING"
 
     def describe_vehicle_status(self, people, cars, road_polygons=()):
         """Human-readable check for the live --motion-debug overlay."""
-        prefix = f"PEOPLE {len(people)} | CARS {len(cars)}"
-        if not road_polygons:
-            return prefix + " | NO ROAD CONFLICT AREA MARKED"
+        prefix = f"PEOPLE {len(people)} | VEHICLES {len(cars)}"
         if not people:
             return prefix + " | NO PERSON DETECTED/TRACKED"
         if not cars:
-            return prefix + " | NO CAR DETECTED/TRACKED"
+            return prefix + " | NO VEHICLE DETECTED/TRACKED"
         diagnoses = [
             (self.explain_vehicle_pair(car, person, road_polygons), cid, pid)
             for cid, car in cars.items()
@@ -206,11 +212,13 @@ class PredictiveMotionMonitor:
         ]
         # Show the most actionable diagnosis, when multiple pairs exist.
         priority = [
+            "AUTOMATIC PATH CONFLICT - CONFIRMING",
             "ROAD CONFLICT CANDIDATE - CONFIRMING",
             "PERSON OFF ROAD - NO CONFIRMED ENTRY",
             "MEETING OUTSIDE MARKED ROAD AREA",
             "APPROACH CANDIDATE - CONFIRMING",
             "APPROACH OUTSIDE 2 SECOND HORIZON",
+            "FOOTPOINT DEPTH MISMATCH",
             "PROJECTED PATHS TOO FAR APART",
             "CAR NOT MOVING TOWARD PERSON",
             "PATHS NOT CLOSING",
@@ -220,7 +228,7 @@ class PredictiveMotionMonitor:
         ]
         diagnoses.sort(key=lambda item: priority.index(item[0]))
         status, cid, pid = diagnoses[0]
-        return f"{prefix} | CAR {cid} / PERSON {pid}: {status}"
+        return f"{prefix} | VEHICLE {cid} / PERSON {pid}: {status}"
 
     def _vehicle_person(self, vehicle_id, vehicle, person_id, person,
                         road_polygons=()):
@@ -243,9 +251,14 @@ class PredictiveMotionMonitor:
             return None
         closest = hypot(direction[0] - relative_v[0] * ahead,
                         direction[1] - relative_v[1] * ahead)
-        if closest > 0.11:
+        # Tight contact-point constraints reduce 2D overlap false alarms
+        # (e.g. traffic passing a pedestrian standing on the far pavement).
+        if abs(direction[1] - relative_v[1] * ahead) > 0.045:
             return None
-        if self._road_status(vehicle, person, ahead, road_polygons) != (
+        if closest > 0.055:
+            return None
+        # A manually marked road region is an OPTIONAL further constraint.
+        if road_polygons and self._road_status(vehicle, person, ahead, road_polygons) != (
                 "ROAD CONFLICT CANDIDATE - CONFIRMING"):
             return None
         return MotionWarning("vehicle_approaching_person", vehicle_id,
@@ -276,11 +289,11 @@ class PredictiveMotionMonitor:
                road_zones=()):
         """Return NEW confirmed warnings and update active warnings.
 
-        detections: (track_id, class_id, (x1,y1,x2,y2)) where class 0 is
-        person and class 2 is car; no detection IDs means no prediction.
-        sharp_zones: iterable of (zone_number, polygon_px) set by operator.
-        road_zones: iterable of (zone_number, polygon_px) manually marked
-        vehicle/pedestrian conflict areas. No marked areas => no car alerts.
+        detections: (track_id, class_id, (x1,y1,x2,y2)) where COCO class 0
+        is a person; 2 car, 5 bus, 7 truck. No IDs means no prediction.
+        sharp_zones: user-marked sharp-prop polygons for separate warnings.
+        road_zones: optional manually marked vehicle conflict regions. Empty
+        means fully automatic vehicle-person screen-space assessment.
         """
         if width <= 0 or height <= 0:
             raise ValueError("Invalid camera size")
@@ -288,7 +301,7 @@ class PredictiveMotionMonitor:
             raise ValueError("Invalid frame timestamp")
         current = {}
         for ident, class_id, box in detections:
-            if ident is None or class_id not in (0, 2):
+            if ident is None or class_id not in (0, 2, 5, 7):
                 continue
             ident = int(ident)
             current[ident] = self._register(ident, int(class_id), box, when, width, height)
@@ -296,7 +309,8 @@ class PredictiveMotionMonitor:
         self.tracks = {ident: track for ident, track in self.tracks.items()
                        if when - track.timestamp <= 2.0}
         people = {ident: track for ident, track in current.items() if track.class_id == 0}
-        cars = {ident: track for ident, track in current.items() if track.class_id == 2}
+        cars = {ident: track for ident, track in current.items()
+                if track.class_id in (2, 5, 7)}
         road_polygons = [
             [(x / width, y / height) for x, y in px]
             for _, px in road_zones if len(px) >= 3
