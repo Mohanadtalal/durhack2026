@@ -182,7 +182,7 @@ def main():
         good = good and passed
     if not good:
         raise SystemExit("[SIM CHECK] FAIL: prediction did not match expectation")
-    print("[SIM CHECK] PASS: positive approach warned; safe pass-by stayed quiet.")
+    print("[SIM CHECK] PASS: all selected scenario expectations matched.")
     print("[SIM] This verifies prediction logic ONLY, not YOLO, ByteTrack, USB, "
           "distance measurement or real-world safety.")
 

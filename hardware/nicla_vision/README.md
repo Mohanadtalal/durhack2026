@@ -428,3 +428,43 @@ python -m edge.nicla_video_test --video data/pedestrians.mp4 --motion-debug --ro
 
 This optional filter can suppress otherwise valid warnings when users draw
 an incorrect polygon, so it is deliberately **OFF by default**.
+
+
+### Safe positive and negative predictor simulation (no real vehicles)
+
+Use this deterministic test to check the autonomous motion predictor can issue a
+warning in a **positive** scenario while staying silent in a **negative** one.
+No downloaded footage, Nicla, road marking, hardware or site are needed.
+
+```powershell
+python -m edge.nicla_motion_sim
+```
+
+The script produces two short annotated MP4s:
+
+- `data/simulations/approach.mp4` — a virtual truck approaches a stationary
+  worker on a converging projected path, so **at least one warning is expected**.
+- `data/simulations/pass.mp4` — the truck moves past a worker at a different
+  image ground-contact row, so **zero warnings are expected**.
+
+The console prints `[SIM HAZARD]`, warning counts and `[SIM CHECK] PASS/FAIL`.
+The command exits nonzero when either scenario fails.
+
+```powershell
+Start-Process "data/simulations/approach.mp4"
+Start-Process "data/simulations/pass.mp4"
+```
+
+For a quick predictor-only test with no MP4 output or OpenCV dependency:
+
+```powershell
+python -m edge.nicla_motion_sim --no-video
+```
+
+**Test boundaries:** The simulator feeds labelled bounding boxes and stable
+tracking IDs *directly* to the actual `PredictiveMotionMonitor`. The drawn
+truck and worker are only visual illustrations of those data. The simulator
+does NOT establish that YOLO would detect the illustrations, ByteTrack would
+track real footage, Nicla can operate fast enough, or the system would warn
+correctly in a physical construction site. Keep PR #5 draft until a suitable
+safe, prerecord-ed realistic positive clip and live-camera setup are checked.
