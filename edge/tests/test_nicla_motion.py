@@ -90,3 +90,27 @@ def test_unmarked_sharp_region_never_triggers():
             [(5, 0, box(65 + i * 30, 180))],
             95 + 0.25 * i, 320, 240))
     assert not events
+
+
+def test_diagnostics_reveal_missing_car_or_person():
+    monitor = PredictiveMotionMonitor()
+    monitor.update([(1, 0, box(250, 180))], 1.0, 320, 240)
+    assert "NO CAR DETECTED" in monitor.debug_summary
+    monitor.update([(2, 2, box(90, 180))], 1.25, 320, 240)
+    assert "NO PERSON DETECTED" in monitor.debug_summary
+
+
+def test_diagnostics_stationary_car_and_approach_candidate():
+    monitor = PredictiveMotionMonitor()
+    for i in range(3):
+        monitor.update([(10, 2, box(70, 180)), (20, 0, box(270, 180))],
+                       10 + i * .25, 320, 240)
+    assert "CAR NOT MOVING TOWARD PERSON" in monitor.debug_summary
+
+    monitor.reset()
+    for i in range(4):
+        monitor.update([(10, 2, box(35 + i * 35, 180)),
+                        (20, 0, box(265, 180))],
+                       20 + i * .25, 320, 240)
+    assert "APPROACH CANDIDATE" in monitor.debug_summary
+    assert "VEHICLE WARNING ACTIVE" in monitor.debug_summary

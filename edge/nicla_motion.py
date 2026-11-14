@@ -75,12 +75,14 @@ class PredictiveMotionMonitor:
         self.states = {}
         self.active = []
         self._last_warnings = {}
+        self.debug_summary = "Waiting for tracked detections"
 
     def reset(self):
         self.tracks.clear()
         self.states.clear()
         self.active = []
         self._last_warnings.clear()
+        self.debug_summary = "Waiting for tracked detections"
 
     def _register(self, ident, class_id, box, when, width, height):
         x1, y1, x2, y2 = box
@@ -102,6 +104,64 @@ class PredictiveMotionMonitor:
         self.tracks[ident] = _Track(class_id, position, when,
                                     velocity[0], velocity[1], count)
         return self.tracks[ident]
+
+    def explain_vehicle_pair(self, vehicle, person):
+        """Explain a *single* failed/pending vehicle prediction.
+
+        Mirrors the screening conditions in _vehicle_person; use for
+        diagnostics only, never to weaken or override safety thresholds.
+        """
+        if vehicle.samples < 2 or person.samples < 2:
+            return "WAITING FOR STABLE TRACK IDS"
+        dx = person.xy[0] - vehicle.xy[0]
+        dy = person.xy[1] - vehicle.xy[1]
+        separation = hypot(dx, dy)
+        if not 0.09 < separation < 0.8:
+            return "OBJECTS TOO CLOSE/FAR IN FRAME"
+        toward = (dx * vehicle.vx + dy * vehicle.vy) / separation
+        if toward < 0.035:
+            return "CAR NOT MOVING TOWARD PERSON"
+        relative_x = vehicle.vx - person.vx
+        relative_y = vehicle.vy - person.vy
+        speed2 = relative_x ** 2 + relative_y ** 2
+        if speed2 < 0.002:
+            return "LITTLE RELATIVE MOTION"
+        ahead = (dx * relative_x + dy * relative_y) / speed2
+        if ahead <= 0.05:
+            return "PATHS NOT CLOSING"
+        if ahead > self.horizon:
+            return "APPROACH OUTSIDE 2 SECOND HORIZON"
+        closest = hypot(dx - relative_x * ahead, dy - relative_y * ahead)
+        if closest > 0.11:
+            return "PROJECTED PATHS TOO FAR APART"
+        return "APPROACH CANDIDATE - CONFIRMING"
+
+    def describe_vehicle_status(self, people, cars):
+        """Human-readable check for the live --motion-debug overlay."""
+        prefix = f"PEOPLE {len(people)} | CARS {len(cars)}"
+        if not people:
+            return prefix + " | NO PERSON DETECTED/TRACKED"
+        if not cars:
+            return prefix + " | NO CAR DETECTED/TRACKED"
+        diagnoses = [
+            (self.explain_vehicle_pair(car, person), cid, pid)
+            for cid, car in cars.items()
+            for pid, person in people.items()
+        ]
+        # Show the most actionable diagnosis, when multiple pairs exist.
+        priority = [
+            "APPROACH CANDIDATE - CONFIRMING",
+            "APPROACH OUTSIDE 2 SECOND HORIZON",
+            "PROJECTED PATHS TOO FAR APART",
+            "CAR NOT MOVING TOWARD PERSON",
+            "PATHS NOT CLOSING",
+            "LITTLE RELATIVE MOTION",
+            "WAITING FOR STABLE TRACK IDS",
+            "OBJECTS TOO CLOSE/FAR IN FRAME",
+        ]
+        diagnoses.sort(key=lambda item: priority.index(item[0]))
+        status, cid, pid = diagnoses[0]
+        return f"{prefix} | CAR {cid} / PERSON {pid}: {status}"
 
     def _vehicle_person(self, vehicle_id, vehicle, person_id, person):
         if vehicle.samples < 2 or person.samples < 2:
@@ -171,6 +231,7 @@ class PredictiveMotionMonitor:
                        if when - track.timestamp <= 2.0}
         people = {ident: track for ident, track in current.items() if track.class_id == 0}
         cars = {ident: track for ident, track in current.items() if track.class_id == 2}
+        self.debug_summary = self.describe_vehicle_status(people, cars)
         candidates = {}
         for car_id, car in cars.items():
             for person_id, person in people.items():
@@ -202,4 +263,6 @@ class PredictiveMotionMonitor:
                 self.states.pop(key, None)
                 self._last_warnings.pop(key, None)
         self.active = sorted(active, key=lambda a: (a.hazard_type, a.source_id, a.target_id))
+        if any(w.hazard_type == "vehicle_approaching_person" for w in self.active):
+            self.debug_summary += " | VEHICLE WARNING ACTIVE"
         return events

@@ -28,7 +28,8 @@ from .zone_rules import ZoneMonitor
 
 def run(port, preview_only=False, no_api=False, dwell=8.0, weights="yolov8n.pt",
         zone_file=DEFAULT_ZONE_FILE, ppe_weights=None, proximity_mm=None,
-        record_path=None, retry_seconds=2.0, predictive=False, sharp_zone_ids=()):
+        record_path=None, retry_seconds=2.0, predictive=False, sharp_zone_ids=(),
+        motion_debug=False):
     import cv2
     import numpy as np
     from .client import send_event, flush_pending
@@ -43,6 +44,8 @@ def run(port, preview_only=False, no_api=False, dwell=8.0, weights="yolov8n.pt",
         raise ValueError("Sharp zone indices start at 1.")
     if sharp_zone_ids and not predictive:
         raise ValueError("Marking a sharp zone requires --predictive.")
+    if motion_debug and not predictive:
+        raise ValueError("Motion diagnostics require --predictive.")
 
     person_model = None
     ppe_model = None
@@ -73,6 +76,7 @@ def run(port, preview_only=False, no_api=False, dwell=8.0, weights="yolov8n.pt",
     recording = None
     nframes = 0
     t0 = time.monotonic()
+    last_motion_debug_log = 0.0
     window = "SiteGuardian: Nicla Vision"
     frame_size = [320, 240]
     running = True
@@ -309,6 +313,15 @@ def run(port, preview_only=False, no_api=False, dwell=8.0, weights="yolov8n.pt",
                                 )
                                 tint = (0, 170, 255) if track.class_id == 2 else (255, 220, 0)
                                 cv2.arrowedLine(frame, start, end, tint, 2, tipLength=0.25)
+                            if motion_debug:
+                                diagnostic = predictor.debug_summary
+                                cv2.putText(
+                                    frame, diagnostic[:65], (4, height - 63),
+                                    cv2.FONT_HERSHEY_SIMPLEX, .28, (0, 255, 255), 1
+                                )
+                                if now - last_motion_debug_log >= 1.5:
+                                    print("[MOTION DEBUG]", diagnostic)
+                                    last_motion_debug_log = now
                             for n, threat in enumerate(predictor.active[:2]):
                                 if threat.hazard_type == "vehicle_approaching_person":
                                     label = f"APPROACH: CAR {threat.source_id} -> PERSON {threat.target_id}"
@@ -451,11 +464,14 @@ def main():
                         help="Track cars and people to warn on converging image-plane paths")
     parser.add_argument("--sharp-zone", type=int, action="append", default=[],
                         help="Saved zone index containing a manually marked sharp prop; repeatable")
+    parser.add_argument("--motion-debug", action="store_true",
+                        help="Show why an approaching-car warning is not firing; requires --predictive")
     args = parser.parse_args()
     try:
         run(args.port, args.preview_only, args.no_api, args.dwell, args.weights,
             args.zone_file, args.ppe_weights, args.proximity_mm,
-            args.record, args.retry_seconds, args.predictive, args.sharp_zone)
+            args.record, args.retry_seconds, args.predictive, args.sharp_zone,
+            args.motion_debug)
     except KeyboardInterrupt:
         print("[EXIT] Interrupted by user")
 

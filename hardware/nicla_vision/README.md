@@ -303,3 +303,28 @@ The Nicla preview draws yellow motion arrows on people and orange arrows on
 cars. An active approaching-car warning adds a red line between the tracked
 car and person. Arrows show a one-second **screen-space extrapolation**;
 they do not convey real-world distance or verified collision time.
+
+### Diagnose why `vehicle_approaching_person` did not trigger
+
+Run with the optional on-screen and terminal diagnostics:
+
+```powershell
+python -m edge.nicla_detector --port COM9 --no-api --predictive --motion-debug
+```
+
+The yellow `[MOTION DEBUG]` summary reports tracked person/car counts
+and the primary reason a prediction has not fired:
+
+- `NO CAR DETECTED/TRACKED`: YOLO or ByteTrack cannot identify the car.
+- `NO PERSON DETECTED/TRACKED`: person detection/tracking failed.
+- `WAITING FOR STABLE TRACK IDS`: needs consecutive frames with consistent IDs.
+- `CAR NOT MOVING TOWARD PERSON`: car is stationary or moving away in image coordinates.
+- `APPROACH OUTSIDE 2 SECOND HORIZON`: projected closest approach occurs too far in the future.
+- `PROJECTED PATHS TOO FAR APART`: paths do not converge closely enough.
+- `APPROACH CANDIDATE - CONFIRMING`: a possible approach is being debounced.
+- `VEHICLE WARNING ACTIVE`: warning was confirmed and LED should be active.
+
+A video of traffic and pedestrians does not necessarily contain a near-path
+approach meeting the heuristic. Filming an existing video on a monitor with
+Nicla's grayscale 320×240 camera further reduces detection quality. Before
+changing sensitivity, **capture the debug output** to determine the issue.
