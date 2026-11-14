@@ -76,3 +76,6 @@ while True:
         red.off()
     elif command == b"ping":
         send_all(b"PONG")
+    elif command == b"vers":
+        # Fixed 4-byte marker: proves the new firmware is actually running.
+        send_all(b"SG03")

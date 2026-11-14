@@ -206,3 +206,24 @@ After testing each independent mode:
 ```powershell
 python -m edge.nicla_detector --port COM9 --no-api --dwell 5 --proximity-mm 800 --ppe-weights data/models/buildvision-hazards-v0.3.pt --record data/siteguardian_demo.mp4
 ```
+
+### Diagnosis for PING works but DIST times out
+
+The board script now supports `vers` and returns a four-byte version marker
+`SG03`. This distinguishes a freshly loaded firmware from older scripts that
+respond `PONG` but ignore `dist`.
+
+After copying this updated feature-branch `main.py` onto the Nicla USB drive,
+safely eject the drive, **unplug and reconnect the USB cable**, keep OpenMV IDE
+closed, and run (with your venv active):
+
+```powershell
+python -c "from edge.nicla_usb import NiclaUSB; n=NiclaUSB.connect('COM9'); print('PING:',n.ping()); print('VERSION:',n.firmware_version()); print('DISTANCE:',n.distance_mm()); n.close()"
+```
+
+Expect `PING: True`, `VERSION: b'SG03'`, and either a distance
+in millimetres or `DISTANCE: None` if the ToF sensor is unavailable.
+
+If VERSION times out, the running board script is still old or did not
+reload. If the marker appears but DIST fails, capture the full error and
+isolate the ToF code without changing the known-good raw camera path.

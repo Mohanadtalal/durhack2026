@@ -72,3 +72,9 @@ def test_partial_command_write_and_disconnect_cleanup():
     stub = Broken()
     NiclaUSB(stub).close()
     assert stub.closed
+
+
+def test_firmware_version_probe():
+    serial = SerialStub(b"SG03")
+    assert NiclaUSB(serial).firmware_version() == b"SG03"
+    assert serial.writes == [b"vers"]

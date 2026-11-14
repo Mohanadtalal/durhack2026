@@ -43,6 +43,11 @@ class NiclaUSB:
         self._send(b"ping")
         return self._read_exact(4) == b"PONG"
 
+    def firmware_version(self) -> bytes:
+        """Probe new firmware. Old programs ignore vers and time out."""
+        self._send(b"vers")
+        return self._read_exact(4)
+
     def snapshot_gray(self, width: int = 320, height: int = 240) -> bytes:
         """Request uncompressed 8-bit grayscale frame using 'raw0' command.
 
