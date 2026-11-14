@@ -100,9 +100,9 @@ def test_unmarked_sharp_region_never_triggers():
 def test_diagnostics_reveal_missing_car_or_person():
     monitor = PredictiveMotionMonitor()
     monitor.update([(1, 0, box(250, 180))], 1.0, 320, 240)
-    assert "NO ROAD CONFLICT AREA MARKED" in monitor.debug_summary
+    assert "NO VEHICLE DETECTED/TRACKED" in monitor.debug_summary
     monitor.update([(2, 2, box(90, 180))], 1.25, 320, 240)
-    assert "NO ROAD CONFLICT AREA MARKED" in monitor.debug_summary
+    assert "NO PERSON DETECTED/TRACKED" in monitor.debug_summary
 
 
 def test_diagnostics_stationary_car_and_approach_candidate():
@@ -121,15 +121,15 @@ def test_diagnostics_stationary_car_and_approach_candidate():
     assert "VEHICLE WARNING ACTIVE" in monitor.debug_summary
 
 
-def test_no_road_polygon_means_no_vehicle_collision_warning():
+def test_automatic_vehicle_prediction_needs_no_road_polygon():
     monitor = PredictiveMotionMonitor()
     events = []
     for i in range(6):
         events.extend(monitor.update(
             [(10, 2, box(35 + i * 35, 180)), (20, 0, box(265, 180))],
             100 + i * .25, 320, 240))
-    assert events == []
-    assert "NO ROAD CONFLICT AREA MARKED" in monitor.debug_summary
+    assert any(e.hazard_type == "vehicle_approaching_person" for e in events)
+    assert "AUTOMATIC PATH CONFLICT" in monitor.debug_summary
 
 
 def test_pedestrian_waiting_on_pavement_not_collision_risk():
@@ -168,3 +168,49 @@ def test_small_pedestrian_box_jitter_does_not_create_road_entry():
              (20, 0, box(250, 160 + (i % 3 - 1) * 2))],
             140 + i * .25, 320, 240, road_zones=[(1, road)]))
     assert events == []
+
+
+def test_unmarked_pavement_pass_by_suppressed_by_ground_contact():
+    monitor = PredictiveMotionMonitor()
+    warnings = []
+    # Vehicle footpoint y=180; stationary worker feet y=155, on an
+    # apparently different ground level/image row. NO manually drawn areas.
+    for i in range(6):
+        warnings.extend(monitor.update(
+            [(30, 2, box(35 + i * 35, 180)), (40, 0, box(265, 155))],
+            200 + i * .25, 320, 240))
+    assert not any(w.hazard_type == "vehicle_approaching_person" for w in warnings)
+    assert any(key in monitor.debug_summary for key in (
+        "FOOTPOINT DEPTH MISMATCH", "PATHS NOT CLOSING",
+        "PROJECTED PATHS TOO FAR APART", "OBJECTS TOO CLOSE/FAR IN FRAME"))
+
+
+def test_truck_moving_toward_static_worker_is_detected_without_zones():
+    monitor = PredictiveMotionMonitor()
+    warnings = []
+    for i in range(6):
+        warnings.extend(monitor.update(
+            [(30, 7, box(35 + i * 35, 180)), (40, 0, box(265, 180))],
+            240 + i * .25, 320, 240))
+    assert any(w.hazard_type == "vehicle_approaching_person" for w in warnings)
+
+
+def test_existing_manual_road_area_is_optional_restriction():
+    lane_far_away = [(10, 30), (310, 30), (310, 70), (10, 70)]
+    monitor = PredictiveMotionMonitor()
+    warnings = []
+    for i in range(6):
+        warnings.extend(monitor.update(
+            [(30, 2, box(35 + i * 35, 180)), (40, 0, box(265, 180))],
+            260 + i * .25, 320, 240, road_zones=[(1, lane_far_away)]))
+    assert not warnings
+
+
+def test_prediction_requires_consistent_direction_over_multiple_frames():
+    monitor = PredictiveMotionMonitor()
+    warnings = []
+    for i, x in enumerate([35, 40, 35, 40, 35, 40]):
+        warnings.extend(monitor.update(
+            [(30, 2, box(x, 180)), (40, 0, box(265, 180))],
+            290 + i * .25, 320, 240))
+    assert not warnings
