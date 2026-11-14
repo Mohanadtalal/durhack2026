@@ -296,3 +296,10 @@ be sent to the backend by removing `--no-api` after integration testing.
 object to test this. Use prerecorded consented footage or harmless props.
 This is a hackathon proof of concept, not a tested collision-avoidance
 system or emergency alarm.
+
+### Predictive overlay
+
+The Nicla preview draws yellow motion arrows on people and orange arrows on
+cars. An active approaching-car warning adds a red line between the tracked
+car and person. Arrows show a one-second **screen-space extrapolation**;
+they do not convey real-world distance or verified collision time.

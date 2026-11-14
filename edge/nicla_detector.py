@@ -292,14 +292,37 @@ def run(port, preview_only=False, no_api=False, dwell=8.0, weights="yolov8n.pt",
                             cv2.putText(frame, "NO ZONES - press E to add", (5, 40),
                                         cv2.FONT_HERSHEY_SIMPLEX, .40, (0, 255, 255), 1)
                         if predictor is not None:
+                            # Draw one-second, image-plane motion arrows.
+                            # They represent optical motion, not physical metres.
+                            for track in predictor.tracks.values():
+                                if track.samples < 2 or now - track.timestamp > 0.3:
+                                    continue
+                                if abs(track.vx) + abs(track.vy) < 0.025:
+                                    continue
+                                start = (
+                                    max(0, min(width - 1, int(track.xy[0] * width))),
+                                    max(0, min(height - 1, int(track.xy[1] * height))),
+                                )
+                                end = (
+                                    max(0, min(width - 1, int((track.xy[0] + track.vx) * width))),
+                                    max(0, min(height - 1, int((track.xy[1] + track.vy) * height))),
+                                )
+                                tint = (0, 170, 255) if track.class_id == 2 else (255, 220, 0)
+                                cv2.arrowedLine(frame, start, end, tint, 2, tipLength=0.25)
                             for n, threat in enumerate(predictor.active[:2]):
                                 if threat.hazard_type == "vehicle_approaching_person":
                                     label = f"APPROACH: CAR {threat.source_id} -> PERSON {threat.target_id}"
+                                    car = predictor.tracks.get(threat.source_id)
+                                    person = predictor.tracks.get(threat.target_id)
+                                    if car is not None and person is not None:
+                                        a = (int(car.xy[0] * width), int(car.xy[1] * height))
+                                        b = (int(person.xy[0] * width), int(person.xy[1] * height))
+                                        cv2.line(frame, a, b, (0, 0, 255), 1)
                                 else:
-                                    label = f"APPROACH: PERSON {threat.source_id} -> SHARP ZONE {threat.target_id}"
+                                    label = f"APPROACH: PERSON {threat.source_id} -> SHARP {threat.target_id}"
                                 cv2.putText(
                                     frame, label, (4, height - 34 - 15 * n),
-                                    cv2.FONT_HERSHEY_SIMPLEX, .37, (0, 0, 255), 2
+                                    cv2.FONT_HERSHEY_SIMPLEX, .35, (0, 0, 255), 2
                                 )
                         if editor.editing:
                             draft = editor.draft_pixels(width, height)
