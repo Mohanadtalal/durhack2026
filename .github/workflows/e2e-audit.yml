@@ -57,3 +57,24 @@ jobs:
             /tmp/siteguardian-api.log
             /tmp/siteguardian-ui.log
           if-no-files-found: ignore
+
+  mongodb:
+    runs-on: ubuntu-latest
+    services:
+      mongo:
+        image: mongo:7
+        ports:
+          - 27017:27017
+    env:
+      MONGODB_URI: "mongodb://127.0.0.1:27017"
+      MONGODB_DB: siteguardian_e2e_audit
+      GEMINI_API_KEY: ""
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install backend test dependencies
+        run: pip install -r backend/requirements.txt -r backend/requirements-dev.txt
+      - name: Test actual MongoDB persistence and event idempotency
+        run: python -m audit.mongo_smoke
