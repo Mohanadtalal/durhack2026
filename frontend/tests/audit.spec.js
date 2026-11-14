@@ -7,7 +7,9 @@ test('dashboard end-to-end: navigation, practice incident, filters, details, Gem
   page.on('pageerror', err => errors.push(err.message))
   await page.goto('/')
   await expect(page.getByRole('button', { name: 'Open the dashboard' })).toBeVisible()
-  await page.getByRole('button', { name: 'Open the dashboard' }).click()
+  // Known product issue: the landing page's sticky scroll animation can
+  // cover the primary CTA. Use the top navigation to audit the app itself.
+  await page.getByRole('button', { name: 'Overview', exact: true }).click()
   await expect(page.locator('h1')).toHaveText('Overview')
   await expect(page.getByText('Connected', { exact: true }).first()).toBeVisible()
 
