@@ -1,41 +1,63 @@
-"""Development memory storage or actual MongoDB incidents. No silent fallback if MongoDB configured."""
+
 from threading import Lock
 from pymongo import MongoClient, DESCENDING
-from pymongo.errors import DuplicateKeyError
-from .config import MONGODB_URI, MONGODB_DB
-from .models import Incident
+from pymongo.errors import DuplicateKeyError #prevents dup incidents, no 2 indiecents with the same id
+from .config import MONGODB_URI, MONGODB_DB #the mongo db address and the name of DB name 
+from .models import Incident #takes the incident from the python file mdoels.py and taktes that incident as an object 
 
-class MemoryStore:
-    mode = "memory"
-    def __init__(self):
-        self._items: dict[str, dict] = {}
-        self._lock = Lock()
 
-    def save(self, event: Incident) -> Incident:
-        with self._lock:
-            self._items.setdefault(event.event_id, event.model_dump(mode="json"))
-        return event
-
-    def recent(self, limit: int) -> list[dict]:
-        with self._lock:
-            return sorted(self._items.values(), key=lambda x: x["timestamp"], reverse=True)[:limit]
-
+#class to manage our database operations 
 class MongoStore:
     mode = "mongodb"
-    def __init__(self, uri: str, db: str):
-        client = MongoClient(uri, serverSelectionTimeoutMS=4000)
-        self.events = client[db].incidents
-        self.events.create_index("event_id", unique=True)
-        self.events.create_index([("timestamp", DESCENDING)])
+    def __init__(self, uri, db):
+        client = MongoClient(uri) #current databse uri
+        self.events = client[db]["incidents"] #database name 
 
+        self.events.create_index("event_id", unique=True)#database primary key event_id
+        self.events.create_index("timestamp")#column timestamp 
+
+    #saves event into db
     def save(self, event: Incident) -> Incident:
         try:
-            self.events.insert_one(event.model_dump(mode="json"))
-        except DuplicateKeyError:
+            self.events.insert_one(event.model_dump(mode="json")) # inserts created event object into the db 
+
+        except DuplicateKeyError: #if there is a dup id, don"t save
             pass
+
+        return event
+
+    #displays any number of recent db incidents 
+    def recent(self, limit: int) -> list[dict]: #put the limit of incidents
+        return list(
+            self.events.find({}, {"_id": 0}) #reads the json format 
+            .sort("timestamp", -1)
+            .limit(limit) # stops at limit 
+        )
+
+#temporary python storage incase mongodb is not online
+class MemoryStore:
+    mode = "memory"
+
+    def __init__(self):
+        self.events = {}
+        self.lock = Lock()
+
+    def save(self, event: Incident) -> Incident:
+        with self.lock:
+            if event.event_id not in self.events:
+                self.events[event.event_id] = event.model_dump(mode="json")
+
         return event
 
     def recent(self, limit: int) -> list[dict]:
-        return list(self.events.find({}, {"_id": 0}).sort("timestamp", -1).limit(limit))
+        with self.lock:
+            return sorted(
+                self.events.values(),
+                key=lambda event: event["timestamp"],
+                reverse=True
+            )[:limit]
+if MONGODB_URI:
+    store = MongoStore(MONGODB_URI, MONGODB_DB) #creates a new object that uses current uri and db name to save and retrieve using our functions 
+else:
+    store = MemoryStore()
 
-store = MongoStore(MONGODB_URI, MONGODB_DB) if MONGODB_URI else MemoryStore()
