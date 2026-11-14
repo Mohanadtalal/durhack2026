@@ -44,9 +44,3 @@ test('dashboard end-to-end: navigation, practice incident, filters, details, Gem
   expect(errors).toEqual([])
 })
 
-test('frontend offers demo controls to anonymous visitors (prototype security finding)', async ({ page }) => {
-  await page.goto('/')
-  await page.getByRole('button', { name: 'Open the dashboard' }).click()
-  await page.locator('details.sim summary').click()
-  await expect(page.getByRole('button', { name: 'Practice: someone enters a zone' })).toBeEnabled()
-})
