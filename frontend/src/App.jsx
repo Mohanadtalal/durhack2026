@@ -1,122 +1,198 @@
-import React,{useEffect,useState} from 'react'
-import {Activity,AlertTriangle,BrainCircuit,CheckCircle2,Database,HardHat,Radio,RefreshCcw,ShieldCheck,WifiOff} from 'lucide-react'
+import React, { useCallback, useMemo, useState } from 'react'
+import { BrainCircuit, HelpCircle, Camera, CheckCircle2, History, LayoutDashboard, Map as MapIcon, Menu, RefreshCcw, ShieldCheck, WifiOff, X } from 'lucide-react'
+import { postEvent, runInsights } from './api'
+import { useIncidents } from './hooks/useIncidents'
+import { ACTIVE_WINDOW_MS, WINDOWS, timeAgo } from './config'
+import { CountUp, Panel } from './components/Common'
+import { StatusHero } from './components/StatusHero'
+import { SiteMap, zoneSummaries } from './components/SiteMap'
+import { HazardBreakdown, SeverityBreakdown, Trend, ZoneBreakdown } from './components/Charts'
+import { Filters, IncidentDetail, IncidentList, Timeline } from './components/Incidents'
+import { InsightPanel } from './components/Insights'
+import { Toasts } from './components/Toasts'
+import { CameraFeed } from './components/CameraFeed'
+import { Landing } from './components/Landing'
+import { Guide } from './components/Guide'
 
-const API=import.meta.env.VITE_API_BASE||'http://127.0.0.1:8000'
-async function api(path,opts){
-  const r=await fetch(API+path,opts)
-  if(!r.ok){
-    const body=await r.json().catch(()=>({}))
-    throw new Error(body.detail||'HTTP '+r.status)
-  }
-  return r.json()
-}
-function friendly(text){return String(text||'').replaceAll('_',' ').replace(/\b\w/g, c=>c.toUpperCase())}
-export default function App(){
-  const [events,setEvents]=useState([])
-  const [stats,setStats]=useState({total:0,by_hazard:{},by_zone:{},by_severity:{}})
-  const [health,setHealth]=useState(null)
-  const [insight,setInsight]=useState(null)
-  const [error,setError]=useState('')
-  const [loading,setLoading]=useState(false)
+const VIEWS = [
+  { id: 'home', label: 'Home', icon: ShieldCheck },
+  { id: 'overview', label: 'Overview', icon: LayoutDashboard, blurb: 'The quick picture: is anything wrong on site right now?' },
+  { id: 'camera', label: 'Camera', icon: Camera, blurb: 'The camera view, with the most recent incidents beside it.' },
+  { id: 'zones', label: 'Site map', icon: MapIcon, blurb: 'A plan of the work areas. Click an area to see what happened there.' },
+  { id: 'history', label: 'History', icon: History, blurb: 'Every recorded incident. Use the menus to narrow the list.' },
+  { id: 'insights', label: 'AI review', icon: BrainCircuit, blurb: 'Ask an AI to spot patterns in past incidents. It only suggests, people decide.' },
+]
+const DEFAULT_FILTERS = { severity: 'all', hazard: 'all', zone: 'all', window: 'all' }
 
-  async function refresh(){
-    try{
-      const [e,s,h]=await Promise.all([api('/api/events?limit=40'),api('/api/stats'),api('/api/health')])
-      setEvents(e);setStats(s);setHealth(h);setError('')
-    }catch(exc){setHealth(null);setError('Backend: '+exc.message)}
-  }
-  useEffect(()=>{refresh();const t=setInterval(refresh,2500);return()=>clearInterval(t)},[])
+export default function App() {
+  const [view, setView] = useState('home')
+  const [menuOpen, setMenuOpen] = useState(false)
+  const [filters, setFilters] = useState(DEFAULT_FILTERS)
+  const [selected, setSelected] = useState(null)
+  const [toasts, setToasts] = useState([])
+  const [insight, setInsight] = useState(null)
+  const [insightAt, setInsightAt] = useState(null)
+  const [insightLoading, setInsightLoading] = useState(false)
+  const [insightError, setInsightError] = useState('')
+  const [simError, setSimError] = useState('')
+  const [guideOpen, setGuideOpen] = useState(false)
+  const [tipGone, setTipGone] = useState(() => { try { return localStorage.getItem('sg-tip') === '1' } catch { return false } })
+  const closeGuide = useCallback(() => setGuideOpen(false), [])
+  const hideTip = () => { setTipGone(true); try { localStorage.setItem('sg-tip', '1') } catch { /* ignore */ } }
 
-  async function demo(kind){
-    try{
-      await api('/api/events',{method:'POST',headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({
-          source_id:'dashboard-simulator',
-          zone_id:kind==='prolonged_exposure'?'cutting-station-a':'loading-zone-b',
-          hazard_type:kind,
-          severity:kind==='prolonged_exposure'?'high':'warning',
-          description:'Simulated hazard event from dashboard button',
-          metadata:{simulated:true}
-        })
+  const dismiss = useCallback((id) => setToasts((t) => t.filter((x) => x.id !== id)), [])
+  const onNew = useCallback((fresh) => {
+    const important = fresh.filter((e) => e.severity !== 'info').slice(0, 3)
+    important.forEach((e) => setTimeout(() => dismiss(e.event_id), 7000))
+    setToasts((t) => [...important.map((e) => ({ ...e, id: e.event_id })), ...t].slice(0, 4))
+  }, [dismiss])
+
+  const { events, health, error, lastUpdated, now, refresh } = useIncidents(onNew)
+
+  const filtered = useMemo(() => {
+    const w = WINDOWS.find((x) => x.id === filters.window)?.ms ?? Infinity
+    return events.filter((e) =>
+      (filters.severity === 'all' || e.severity === filters.severity) &&
+      (filters.hazard === 'all' || e.hazard_type === filters.hazard) &&
+      (filters.zone === 'all' || e.zone_id === filters.zone) &&
+      now - e.ts <= w)
+  }, [events, filters, now])
+
+  const high = filtered.filter((e) => e.severity === 'high' || e.severity === 'critical').length
+  const activeZones = zoneSummaries(events, now).filter((z) => z.recent > 0).length
+  const latest = events[0]
+
+  async function simulate(kind) {
+    setSimError('')
+    const prolonged = kind === 'prolonged_exposure'
+    try {
+      await postEvent({
+        source_id: 'dashboard-simulator',
+        zone_id: prolonged ? 'cutting-station-a' : 'loading-zone-b',
+        hazard_type: kind,
+        severity: prolonged ? 'high' : 'warning',
+        description: 'Simulated ' + kind.replaceAll('_', ' ') + ' from the dashboard button',
+        metadata: { simulated: true },
       })
       await refresh()
-    }catch(exc){setError('Simulation: '+exc.message)}
+    } catch (exc) { setSimError('Simulation failed: ' + exc.message) }
   }
 
-  async function analyze(){
-    setLoading(true);setError('')
-    try{setInsight(await api('/api/insights',{method:'POST'}))}
-    catch(exc){setError('Gemini: '+exc.message)}
-    finally{setLoading(false)}
+  async function analyse() {
+    setInsightLoading(true); setInsightError('')
+    try { setInsight(await runInsights()); setInsightAt(Date.now()) }
+    catch (exc) { setInsightError(exc.message) }
+    finally { setInsightLoading(false) }
   }
 
-  return <div className="layout">
-    <aside className="sidebar">
-      <div className="logo"><ShieldCheck size={29}/><div>SiteGuardian<span>AI</span><small>DURHACK 2026</small></div></div>
-      <nav>
-        <div className="nav active"><Activity size={18}/>Safety Overview</div>
-        <div className="nav"><Radio size={18}/>Monitoring Zones</div>
-        <div className="nav"><Database size={18}/>Incident History</div>
-        <div className="nav"><BrainCircuit size={18}/>Gemini Insights</div>
-      </nav>
-      <div className="footnote">PROTOTYPE / DEMO ONLY<br/>Not a certified safety device</div>
-    </aside>
-    <main>
-      <header>
-        <div><div className="eyebrow">INTELLIGENT SAFETY MONITORING</div><h1>Site Command Centre</h1><p>Detect hazards. Remember near misses. Prevent repeat incidents.</p></div>
-        <div className={'health '+(health?'connected':'disconnected')}>{health?<><CheckCircle2 size={16}/>API online · {health.storage_mode}</>:<><WifiOff size={16}/>API disconnected</>}</div>
+  const go = (id) => { setView(id); setMenuOpen(false) }
+  const selectZone = (zone) => { setFilters({ ...filters, zone }); }
+  const insightPanel = <InsightPanel insight={insight} loading={insightLoading} error={insightError} canRun={events.length > 0} onRun={analyse} generatedAt={insightAt} />
+
+  return (
+    <div className="layout">
+      <a className="skip" href="#content">Skip to content</a>
+      <header className="site-nav">
+        <div className="site-nav-in">
+          <button className="logo-btn" onClick={() => go('home')} aria-label="SiteGuardian home"><span className="logo-mark"><ShieldCheck size={17} /></span><span className="logo-text">SiteGuardian</span></button>
+          <nav aria-label="Main">
+            {VIEWS.map(({ id, label }) => (
+              <button key={id} className={'nav-link' + (view === id ? ' active' : '')} onClick={() => go(id)} aria-current={view === id ? 'page' : undefined}>{label}</button>
+            ))}
+          </nav>
+          <button className="help-btn" onClick={() => setGuideOpen(true)}><HelpCircle size={16} /> Help</button>
+          <div className={'health ' + (health ? 'ok' : 'down')} role="status">{health ? <><CheckCircle2 size={15} /> Online</> : <><WifiOff size={15} /> Offline</>}</div>
+        </div>
       </header>
-      {error&&<div className="error" role="alert">{error}</div>}
-      <section className="stats">
-        <div className="metric"><span>Recorded incidents<Database size={17}/></span><strong>{stats.total}</strong><small>Latest 200 events</small></div>
-        <div className="metric"><span>High-priority alerts<AlertTriangle size={17}/></span><strong>{(stats.by_severity.high||0)+(stats.by_severity.critical||0)}</strong><small>High and critical events</small></div>
-        <div className="metric"><span>Active history zones<HardHat size={17}/></span><strong>{Object.keys(stats.by_zone).length}</strong><small>Zones with records</small></div>
-        <div className="metric"><span>Gemini insights<BrainCircuit size={17}/></span><strong>{insight?'Ready':'Idle'}</strong><small>Human-reviewed suggestions</small></div>
-      </section>
-      <div className="grid">
-        <section className="panel">
-          <div className="panel-head"><div><h2>Zone Overview</h2><p>Interactive demonstration controls</p></div><span className="pill">SIMULATED</span></div>
-          <div className="zone-visual">
-            <div className="zone-label">ZONE A · MOCK CUTTING STATION</div>
-            <div className="zone-circle"><HardHat size={52}/><span>Restricted area</span></div>
-            <div className="zone-description">Live webcam detection runs separately in the edge agent.</div>
+
+      <main key={view} id="content" className={view === 'home' ? 'is-home' : ''}>
+        {view !== 'home' && <div className="page-head">
+          <div>
+            <h1>{VIEWS.find((v) => v.id === view).label}</h1>
+            <p className="page-blurb">{VIEWS.find((v) => v.id === view).blurb}</p>
+            <p className="page-upd">{lastUpdated ? 'Updated ' + timeAgo(lastUpdated, now) : 'Connecting to the server…'}</p>
           </div>
-          <div className="actions">
-            <button onClick={()=>demo('zone_entry')}>Simulate zone entry</button>
-            <button className="secondary" onClick={()=>demo('prolonged_exposure')}>Simulate prolonged exposure</button>
+          <div className={'health ' + (health ? 'ok' : 'down')} role="status">
+            {health ? <><CheckCircle2 size={16} /> Connected</> : <><WifiOff size={16} /> Can't reach the server</>}
           </div>
-        </section>
-        <section className="panel">
-          <div className="panel-head"><div><h2>Recent Incidents</h2><p>Actual API records (including marked simulations)</p></div><button className="refresh" onClick={refresh} aria-label="Refresh"><RefreshCcw size={18}/></button></div>
-          <div className="events">
-            {events.length?events.map(e=><div className="event" key={e.event_id}>
-              <div className={'event-badge '+e.severity}><AlertTriangle size={18}/></div>
-              <div className="event-main">
-                <b>{friendly(e.hazard_type)}</b>
-                <span>{friendly(e.zone_id)} · {new Date(e.timestamp).toLocaleTimeString()}</span>
-                <small>{e.description}</small>
-              </div>
-              {e.metadata?.simulated&&<em>SIM</em>}
-            </div>):<div className="empty">No incidents yet. Start the demo agent or press a simulation button.</div>}
+        </div>}
+
+        {view !== 'home' && error && <div className="error" role="alert">Can't reach the server right now, so this page may be out of date. Check that the backend is running. ({error})</div>}
+        {view !== 'home' && health?.storage_mode === 'memory' && <div className="notice">Practice mode: incidents are only kept temporarily and disappear when the server restarts.</div>}
+
+        {view !== 'home' && !tipGone && <div className="tip"><span><b>New here?</b> A two-minute guide explains every colour and word on this site.</span><button className="primary" onClick={() => { setGuideOpen(true); hideTip() }}>Open the guide</button><button className="link" onClick={hideTip}>No thanks</button></div>}
+
+        {view === 'home' && <Landing events={events} now={now} onOpen={go} />}
+        {view === 'overview' && <StatusHero events={events} now={now} />}
+
+        {view === 'overview' && (<>
+          <div className="grid two">
+            <Panel tone="blue" title="Site plan" note="Each box is a work area, coloured by its latest alert. Click one to see what happened there.">
+              <SiteMap events={events} now={now} selectedZone={filters.zone} onSelectZone={selectZone} />
+            </Panel>
+            <Panel tone="violet" title="Latest incidents" note="Newest first. Click one for the full story." action={<button className="icon-btn" onClick={refresh} aria-label="Refresh now"><RefreshCcw size={17} /></button>}>
+              <div className="scroll tall"><IncidentList incidents={filtered.slice(0, 6)} now={now} onOpen={setSelected} /></div>
+            </Panel>
           </div>
-        </section>
-      </div>
-      <div className="grid lower">
-        <section className="panel">
-          <div className="panel-head"><div><h2>Risk Pattern Breakdown</h2><p>Counted directly from incident history</p></div></div>
-          {Object.keys(stats.by_hazard).length?Object.entries(stats.by_hazard).map(([k,v])=>
-            <div className="bar-line" key={k}>
-              <span>{friendly(k)}</span><div className="bar-track"><div style={{width:(100*v/Math.max(1,stats.total))+'%'}}/></div><b>{v}</b>
+          <div className="grid cam">
+            <Panel tone="teal" title="Camera" note="What the camera on site sees"><CameraFeed latest={events[0]} now={now} /></Panel>
+            <Panel tone="pink" title="AI pattern review" note="Gemini looks for problems that keep repeating"><div className="scroll tall">{insightPanel}</div></Panel>
+          </div>
+          <details className="sim">
+            <summary>Try it: make a practice alert</summary>
+            <p className="muted">Handy if nothing has been reported yet. These make a practice incident, clearly labelled Simulated, so you can see how alerts look. They are not real detections.</p>
+            <div className="actions">
+              <button className="primary" onClick={() => simulate('zone_entry')}>Practice: someone enters a zone</button>
+              <button className="secondary" onClick={() => simulate('prolonged_exposure')}>Practice: someone stays too long</button>
             </div>
-          ):<div className="empty">Incident counts appear once the detector logs events.</div>}
-        </section>
-        <section className="panel">
-          <div className="panel-head"><div><h2>Gemini Safety Intelligence</h2><p>Evidence-based suggestions · advisory only</p></div><BrainCircuit size={20}/></div>
-          <button className="analyze" disabled={loading||events.length===0} onClick={analyze}>{loading?'Analysing...':'Analyse incidents with Gemini'}</button>
-          {insight?<div className="insight"><div className="eyebrow">AI REVIEW · {insight.events_analyzed} EVENTS</div><p>{insight.summary}</p><small>{insight.model} · Verify all recommendations with a competent supervisor</small></div>:<div className="empty">Add incidents, then ask Gemini to identify patterns in real stored records. Missing API credentials produce an error rather than fabricated insights.</div>}
-        </section>
-      </div>
-      <footer>SiteGuardian AI · Hackathon prototype · Camera and alarms require testing before any real-world use.</footer>
-    </main>
-  </div>
+            {simError && <div className="error" role="alert">{simError}</div>}
+            <p className="muted">Or run <code>python -m edge.demo</code> to send events the way the edge agent does.</p>
+          </details>
+        </>)}
+
+        {view === 'camera' && (
+          <div className="grid cam">
+            <Panel title="Camera" note="What the camera on site sees"><CameraFeed latest={events[0]} now={now} /></Panel>
+            <Panel title="Incidents from the camera" note="Newest first"><div className="scroll tall"><IncidentList incidents={events.slice(0, 20)} now={now} onOpen={setSelected} /></div></Panel>
+          </div>
+        )}
+
+        {view === 'zones' && (
+          <div className="grid two">
+            <Panel title="Site plan" note="Click a box to see only that area.">
+              <SiteMap events={events} now={now} selectedZone={filters.zone} onSelectZone={selectZone} />
+            </Panel>
+            <Panel title={filters.zone === 'all' ? 'Incidents by zone' : 'Incidents in selected zone'}>
+              {filters.zone === 'all'
+                ? <ZoneBreakdown events={events} />
+                : <><button className="link" onClick={() => selectZone('all')}>Show all zones</button><div className="scroll"><IncidentList incidents={events.filter((e) => e.zone_id === filters.zone)} now={now} onOpen={setSelected} emptyText="No incidents recorded in this zone." /></div></>}
+            </Panel>
+          </div>
+        )}
+
+        {view === 'history' && (<>
+          <Filters filters={filters} setFilters={setFilters} events={events} shown={filtered.length} />
+          <div className="grid two">
+            <Panel title="Incidents"><div className="scroll tall"><IncidentList incidents={filtered} now={now} onOpen={setSelected} emptyText="No incidents match these filters." /></div></Panel>
+            <div className="stack">
+              <Panel title="Timeline" note="Most recent 15 for the current filters"><Timeline incidents={filtered} now={now} onOpen={setSelected} /></Panel>
+              <Panel title="Trouble spots" note="Areas with the most incidents come first"><ZoneBreakdown events={filtered} /></Panel>
+              <Panel title="How serious"><SeverityBreakdown events={filtered} /></Panel>
+              <Panel title="When it happens"><Trend events={filtered} now={now} /></Panel>
+            </div>
+          </div>
+        </>)}
+
+        {view === 'insights' && (
+          <Panel title="AI safety review" note="Gemini reads saved incidents only. It never sets off an alarm.">{insightPanel}</Panel>
+        )}
+
+        <footer>SiteGuardian is a hackathon prototype. Test cameras and alarms before any real use.</footer>
+      </main>
+
+      <Guide open={guideOpen} onClose={closeGuide} onGo={go} />
+      <Toasts toasts={toasts} dismiss={dismiss} />
+      <IncidentDetail incident={selected} onClose={() => setSelected(null)} />
+    </div>
+  )
 }
