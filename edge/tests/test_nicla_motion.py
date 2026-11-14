@@ -1,6 +1,11 @@
 """Predictive motion tests use synthetic frames, no physical hazards."""
 from edge.nicla_motion import PredictiveMotionMonitor
 
+ROAD = [(10, 130), (310, 130), (310, 230), (10, 230)]
+
+def lane():
+    return [(1, ROAD)]
+
 
 def box(cx, y, width=20):
     return (cx - width // 2, y - 60, cx + width // 2, y)
@@ -13,7 +18,7 @@ def test_car_approaching_standing_person_is_predicted():
         # 320x240: car moves +35px/frame at 4 FPS; person stays still.
         events += monitor.update(
             [(10, 2, box(35 + i * 35, 180)), (20, 0, box(265, 180))],
-            when=10 + i * 0.25, width=320, height=240)
+            when=10 + i * 0.25, width=320, height=240, road_zones=lane())
     assert any(e.hazard_type == "vehicle_approaching_person" for e in events)
     assert monitor.active
     assert monitor.active[0].source_id == 10
@@ -27,7 +32,7 @@ def test_stationary_car_and_car_driving_away_never_alert():
         for i, x in enumerate(positions):
             warnings += monitor.update(
                 [(1, 2, box(x, 180)), (2, 0, box(280, 180))],
-                30 + i * 0.25, 320, 240)
+                30 + i * 0.25, 320, 240, road_zones=lane())
         assert warnings == []
 
 
@@ -68,7 +73,7 @@ def test_two_frames_required_for_alert():
     person = (20, 0, box(260, 180))
     for i in range(2):
         assert monitor.update([(10, 2, box(60+i*20, 180)), person],
-                              70+i*0.25, 320, 240) == []
+                              70+i*0.25, 320, 240, road_zones=lane()) == []
 
 
 def test_person_approaching_parked_car_is_not_vehicle_alert():
@@ -78,7 +83,7 @@ def test_person_approaching_parked_car_is_not_vehicle_alert():
     for i in range(5):
         events.extend(monitor.update(
             [(10, 2, box(210, 180)), (20, 0, box(30 + i * 35, 180))],
-            80 + 0.25 * i, 320, 240))
+            80 + 0.25 * i, 320, 240, road_zones=lane()))
     assert not any(e.hazard_type == "vehicle_approaching_person" for e in events)
 
 
@@ -95,22 +100,71 @@ def test_unmarked_sharp_region_never_triggers():
 def test_diagnostics_reveal_missing_car_or_person():
     monitor = PredictiveMotionMonitor()
     monitor.update([(1, 0, box(250, 180))], 1.0, 320, 240)
-    assert "NO CAR DETECTED" in monitor.debug_summary
+    assert "NO ROAD CONFLICT AREA MARKED" in monitor.debug_summary
     monitor.update([(2, 2, box(90, 180))], 1.25, 320, 240)
-    assert "NO PERSON DETECTED" in monitor.debug_summary
+    assert "NO ROAD CONFLICT AREA MARKED" in monitor.debug_summary
 
 
 def test_diagnostics_stationary_car_and_approach_candidate():
     monitor = PredictiveMotionMonitor()
     for i in range(3):
         monitor.update([(10, 2, box(70, 180)), (20, 0, box(270, 180))],
-                       10 + i * .25, 320, 240)
+                       10 + i * .25, 320, 240, road_zones=lane())
     assert "CAR NOT MOVING TOWARD PERSON" in monitor.debug_summary
 
     monitor.reset()
     for i in range(4):
         monitor.update([(10, 2, box(35 + i * 35, 180)),
                         (20, 0, box(265, 180))],
-                       20 + i * .25, 320, 240)
-    assert "APPROACH CANDIDATE" in monitor.debug_summary
+                       20 + i * .25, 320, 240, road_zones=lane())
+    assert "ROAD CONFLICT CANDIDATE" in monitor.debug_summary
     assert "VEHICLE WARNING ACTIVE" in monitor.debug_summary
+
+
+def test_no_road_polygon_means_no_vehicle_collision_warning():
+    monitor = PredictiveMotionMonitor()
+    events = []
+    for i in range(6):
+        events.extend(monitor.update(
+            [(10, 2, box(35 + i * 35, 180)), (20, 0, box(265, 180))],
+            100 + i * .25, 320, 240))
+    assert events == []
+    assert "NO ROAD CONFLICT AREA MARKED" in monitor.debug_summary
+
+
+def test_pedestrian_waiting_on_pavement_not_collision_risk():
+    monitor = PredictiveMotionMonitor()
+    # Vehicle is in road (foot y=180); person is outside (foot y=150).
+    road = [(10, 169), (310, 169), (310, 230), (10, 230)]
+    events = []
+    for i in range(6):
+        events.extend(monitor.update(
+            [(10, 2, box(35 + 30 * i, 180)),
+             (20, 0, box(250, 150))],
+            120 + i * .25, 320, 240, road_zones=[(1, road)]))
+    assert not any(x.hazard_type == "vehicle_approaching_person" for x in events)
+
+
+def test_car_outside_marked_road_cannot_trigger():
+    monitor = PredictiveMotionMonitor()
+    road = [(10, 201), (310, 201), (310, 230), (10, 230)]
+    events = []
+    for i in range(6):
+        events.extend(monitor.update(
+            [(10, 2, box(35 + 30 * i, 180)),
+             (20, 0, box(250, 180))],
+            130 + i * .25, 320, 240, road_zones=[(1, road)]))
+    assert events == []
+
+
+def test_small_pedestrian_box_jitter_does_not_create_road_entry():
+    monitor = PredictiveMotionMonitor()
+    # Person stays off marked road, even with +-2 pixel bbox movements.
+    road = [(10, 165), (310, 165), (310, 230), (10, 230)]
+    events = []
+    for i in range(7):
+        events.extend(monitor.update(
+            [(10, 2, box(30 + i * 30, 180)),
+             (20, 0, box(250, 160 + (i % 3 - 1) * 2))],
+            140 + i * .25, 320, 240, road_zones=[(1, road)]))
+    assert events == []

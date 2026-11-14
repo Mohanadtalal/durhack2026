@@ -28,6 +28,7 @@ class _Track:
     vx: float = 0.0
     vy: float = 0.0
     samples: int = 1
+    history: tuple = ()
 
 
 def _distance(a, b):
@@ -88,30 +89,83 @@ class PredictiveMotionMonitor:
         x1, y1, x2, y2 = box
         position = ((x1 + x2) / (2.0 * width), y2 / float(height))
         previous = self.tracks.get(ident)
-        velocity = (0.0, 0.0)
+        history = ((when, position),)
         count = 1
+        velocity = (0.0, 0.0)
         if previous and previous.class_id == class_id:
             dt = when - previous.timestamp
-            if 0.03 <= dt <= 2.0:
-                new_x = (position[0] - previous.xy[0]) / dt
-                new_y = (position[1] - previous.xy[1]) / dt
-                if previous.samples < 2:
-                    velocity = (new_x, new_y)
-                else:
-                    velocity = (0.6 * new_x + 0.4 * previous.vx,
-                                0.6 * new_y + 0.4 * previous.vy)
+            jump = _distance(position, previous.xy)
+            # Tracker reuse/jumps or a video seek cannot be treated as motion.
+            if 0.03 <= dt <= 1.25 and jump <= 0.32:
+                history = tuple((t, p) for t, p in previous.history
+                                if when - t <= 1.0)[-5:] + ((when, position),)
                 count = previous.samples + 1
+                span = history[-1][0] - history[0][0]
+                if len(history) >= 3 and span >= 0.25:
+                    # Multi-frame least-squares trend is less jittery than
+                    # velocity computed from only two adjacent detections.
+                    mean_t = sum(t for t, _ in history) / len(history)
+                    denom = sum((t - mean_t) ** 2 for t, _ in history)
+                    if denom > 1e-6:
+                        velocity = tuple(
+                            sum((t - mean_t) * p[axis] for t, p in history)
+                            / denom for axis in (0, 1)
+                        )
         self.tracks[ident] = _Track(class_id, position, when,
-                                    velocity[0], velocity[1], count)
+                                   velocity[0], velocity[1], count, history)
         return self.tracks[ident]
 
-    def explain_vehicle_pair(self, vehicle, person):
+    def _road_status(self, vehicle, person, ahead, road_polygons):
+        """Check a likely encounter is inside a marked *vehicle conflict* area.
+
+        A stationary person waiting outside the polygon is never counted as
+        in the lane. A pedestrian outside can qualify only when their
+        multi-frame motion carries them into the polygon soon. Image-only
+        regions cannot establish physical safety or world-space distance.
+        """
+        if not road_polygons:
+            return "NO ROAD CONFLICT AREA MARKED"
+        v_future = (vehicle.xy[0] + vehicle.vx * ahead,
+                    vehicle.xy[1] + vehicle.vy * ahead)
+        p_future = (person.xy[0] + person.vx * ahead,
+                    person.xy[1] + person.vy * ahead)
+        for polygon in road_polygons:
+            if not (point_in_polygon(v_future, polygon)
+                    and point_in_polygon(p_future, polygon)):
+                continue
+            if point_in_polygon(person.xy, polygon):
+                return "ROAD CONFLICT CANDIDATE - CONFIRMING"
+            if person.samples < 4 or len(person.history) < 4:
+                return "PERSON OFF ROAD - NO CONFIRMED ENTRY"
+            # A person moving into traffic must show a meaningful trend over
+            # multiple samples. This rejects box jitter at the kerb.
+            elapsed = person.history[-1][0] - person.history[0][0]
+            moved = _distance(person.history[-1][1], person.history[0][1])
+            if elapsed < 0.3 or moved < 0.035:
+                return "PERSON OFF ROAD - NO CONFIRMED ENTRY"
+            # They must actually cross the marked boundary in the predicted
+            # approach interval; motion parallel to the kerb doesn't qualify.
+            enters = any(
+                point_in_polygon(
+                    (person.xy[0] + person.vx * ahead * step / 4,
+                     person.xy[1] + person.vy * ahead * step / 4),
+                    polygon,
+                )
+                for step in range(1, 5)
+            )
+            if enters:
+                return "ROAD CONFLICT CANDIDATE - CONFIRMING"
+        return "MEETING OUTSIDE MARKED ROAD AREA"
+
+    def explain_vehicle_pair(self, vehicle, person, road_polygons=()):
         """Explain a *single* failed/pending vehicle prediction.
 
         Mirrors the screening conditions in _vehicle_person; use for
         diagnostics only, never to weaken or override safety thresholds.
         """
-        if vehicle.samples < 2 or person.samples < 2:
+        if not road_polygons:
+            return "NO ROAD CONFLICT AREA MARKED"
+        if vehicle.samples < 4 or person.samples < 4:
             return "WAITING FOR STABLE TRACK IDS"
         dx = person.xy[0] - vehicle.xy[0]
         dy = person.xy[1] - vehicle.xy[1]
@@ -134,22 +188,27 @@ class PredictiveMotionMonitor:
         closest = hypot(dx - relative_x * ahead, dy - relative_y * ahead)
         if closest > 0.11:
             return "PROJECTED PATHS TOO FAR APART"
-        return "APPROACH CANDIDATE - CONFIRMING"
+        return self._road_status(vehicle, person, ahead, road_polygons)
 
-    def describe_vehicle_status(self, people, cars):
+    def describe_vehicle_status(self, people, cars, road_polygons=()):
         """Human-readable check for the live --motion-debug overlay."""
         prefix = f"PEOPLE {len(people)} | CARS {len(cars)}"
+        if not road_polygons:
+            return prefix + " | NO ROAD CONFLICT AREA MARKED"
         if not people:
             return prefix + " | NO PERSON DETECTED/TRACKED"
         if not cars:
             return prefix + " | NO CAR DETECTED/TRACKED"
         diagnoses = [
-            (self.explain_vehicle_pair(car, person), cid, pid)
+            (self.explain_vehicle_pair(car, person, road_polygons), cid, pid)
             for cid, car in cars.items()
             for pid, person in people.items()
         ]
         # Show the most actionable diagnosis, when multiple pairs exist.
         priority = [
+            "ROAD CONFLICT CANDIDATE - CONFIRMING",
+            "PERSON OFF ROAD - NO CONFIRMED ENTRY",
+            "MEETING OUTSIDE MARKED ROAD AREA",
             "APPROACH CANDIDATE - CONFIRMING",
             "APPROACH OUTSIDE 2 SECOND HORIZON",
             "PROJECTED PATHS TOO FAR APART",
@@ -163,8 +222,9 @@ class PredictiveMotionMonitor:
         status, cid, pid = diagnoses[0]
         return f"{prefix} | CAR {cid} / PERSON {pid}: {status}"
 
-    def _vehicle_person(self, vehicle_id, vehicle, person_id, person):
-        if vehicle.samples < 2 or person.samples < 2:
+    def _vehicle_person(self, vehicle_id, vehicle, person_id, person,
+                        road_polygons=()):
+        if vehicle.samples < 4 or person.samples < 4:
             return None
         direction = (person.xy[0] - vehicle.xy[0],
                      person.xy[1] - vehicle.xy[1])
@@ -184,6 +244,9 @@ class PredictiveMotionMonitor:
         closest = hypot(direction[0] - relative_v[0] * ahead,
                         direction[1] - relative_v[1] * ahead)
         if closest > 0.11:
+            return None
+        if self._road_status(vehicle, person, ahead, road_polygons) != (
+                "ROAD CONFLICT CANDIDATE - CONFIRMING"):
             return None
         return MotionWarning("vehicle_approaching_person", vehicle_id,
                              person_id, ahead, closest)
@@ -209,12 +272,15 @@ class PredictiveMotionMonitor:
                                      person_id, zone_id, future, future_distance)
         return None
 
-    def update(self, detections, when, width, height, sharp_zones=()):
+    def update(self, detections, when, width, height, sharp_zones=(),
+               road_zones=()):
         """Return NEW confirmed warnings and update active warnings.
 
         detections: (track_id, class_id, (x1,y1,x2,y2)) where class 0 is
         person and class 2 is car; no detection IDs means no prediction.
         sharp_zones: iterable of (zone_number, polygon_px) set by operator.
+        road_zones: iterable of (zone_number, polygon_px) manually marked
+        vehicle/pedestrian conflict areas. No marked areas => no car alerts.
         """
         if width <= 0 or height <= 0:
             raise ValueError("Invalid camera size")
@@ -231,11 +297,16 @@ class PredictiveMotionMonitor:
                        if when - track.timestamp <= 2.0}
         people = {ident: track for ident, track in current.items() if track.class_id == 0}
         cars = {ident: track for ident, track in current.items() if track.class_id == 2}
-        self.debug_summary = self.describe_vehicle_status(people, cars)
+        road_polygons = [
+            [(x / width, y / height) for x, y in px]
+            for _, px in road_zones if len(px) >= 3
+        ]
+        self.debug_summary = self.describe_vehicle_status(people, cars, road_polygons)
         candidates = {}
         for car_id, car in cars.items():
             for person_id, person in people.items():
-                found = self._vehicle_person(car_id, car, person_id, person)
+                found = self._vehicle_person(car_id, car, person_id, person,
+                                             road_polygons)
                 if found is not None:
                     candidates[("vehicle", car_id, person_id)] = found
         for zone_id, px in sharp_zones:
