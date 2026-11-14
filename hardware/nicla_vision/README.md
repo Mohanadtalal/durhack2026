@@ -232,3 +232,239 @@ in millimetres or `DISTANCE: None` if the ToF sensor is unavailable.
 If VERSION times out, the running board script is still old or did not
 reload. If the marker appears but DIST fails, capture the full error and
 isolate the ToF code without changing the known-good raw camera path.
+
+## Predictive motion hazards (optional, experimental)
+
+This mode attempts **early warnings before image-space paths meet**. It uses
+Ultralytics ByteTrack persistent track IDs and 2D movement history; it
+requires a **fixed/mounted camera** and works without any firmware changes.
+
+### Case A: Car moving toward a person
+
+```powershell
+python -m edge.nicla_detector --port COM9 --no-api --predictive
+```
+
+The default person YOLO detects COCO class 0 (person) and class 2 (car).
+ByteTrack assigns IDs such as `PERSON #2` and `CAR #5`. After at least two
+consecutive consistent approaching predictions, the overlay warns
+`APPROACH: CAR 5 -> PERSON 2` and activates the red Nicla LED.
+The terminal prints `vehicle_approaching_person`.
+Stationary cars and vehicles moving away are ignored by the prediction logic.
+
+This is a **screen-plane path-convergence heuristic** using box bottom-centres,
+not physically calibrated time-to-collision, 3D velocity or a collision
+probability. Camera shake, object scale changes and perspective may create
+incorrect warnings, and small/toy cars may not be recognised by COCO YOLO.
+
+### Case B: Person moving toward a manually marked sharp hazard
+
+You must manually locate a harmless **sharp-object stand-in** (such as a
+cardboard sign or foam prop) by creating a zone with **E → clicks → S**.
+Do not use actual sharp or dangerous objects during tests.
+
+```powershell
+python -m edge.nicla_detector --port COM9 --no-api --predictive --sharp-zone 1
+```
+
+This designates saved zone 1 as the place where an operator identified a
+potential sharp hazard. Other zones can be marked with repeated
+`--sharp-zone 2` arguments. You may draw the zone after starting the
+program. The program predicts when the person's box-footpoint trajectory
+moves toward that region, shows
+`APPROACH: PERSON 2 -> SHARP ZONE 1`, and emits
+`person_approaching_marked_sharp_zone` once confirmed.
+
+**Important: the current program does NOT automatically recognise all sharp
+objects or distinguish backward walking from forward/sideways movement.**
+It warns on movement *toward a manually marked hazard*. Actual backward
+motion classification needs a separately validated pose/orientation system
+and sufficiently clear frames. Do not demonstrate this as a verified
+`walking backward` classifier.
+
+You can combine prediction with PPE and ToF and record an annotated demo:
+
+```powershell
+python -m edge.nicla_detector --port COM9 --no-api --predictive --sharp-zone 1 --proximity-mm 800 --ppe-weights data/models/buildvision-hazards-v0.3.pt --record data/predictive_demo.mp4
+```
+
+The predicted hazards use the existing event shape, with the corresponding
+camera-track IDs and `screen_plane_prediction: true` metadata. Events can
+be sent to the backend by removing `--no-api` after integration testing.
+
+**Safety:** Never stage a real vehicle approaching a person or use a sharp
+object to test this. Use prerecorded consented footage or harmless props.
+This is a hackathon proof of concept, not a tested collision-avoidance
+system or emergency alarm.
+
+### Predictive overlay
+
+The Nicla preview draws yellow motion arrows on people and orange arrows on
+cars. An active approaching-car warning adds a red line between the tracked
+car and person. Arrows show a one-second **screen-space extrapolation**;
+they do not convey real-world distance or verified collision time.
+
+### Diagnose why `vehicle_approaching_person` did not trigger
+
+Run with the optional on-screen and terminal diagnostics:
+
+```powershell
+python -m edge.nicla_detector --port COM9 --no-api --predictive --motion-debug
+```
+
+The yellow `[MOTION DEBUG]` summary reports tracked person/car counts
+and the primary reason a prediction has not fired:
+
+- `NO CAR DETECTED/TRACKED`: YOLO or ByteTrack cannot identify the car.
+- `NO PERSON DETECTED/TRACKED`: person detection/tracking failed.
+- `WAITING FOR STABLE TRACK IDS`: needs consecutive frames with consistent IDs.
+- `CAR NOT MOVING TOWARD PERSON`: car is stationary or moving away in image coordinates.
+- `APPROACH OUTSIDE 2 SECOND HORIZON`: projected closest approach occurs too far in the future.
+- `PROJECTED PATHS TOO FAR APART`: paths do not converge closely enough.
+- `APPROACH CANDIDATE - CONFIRMING`: a possible approach is being debounced.
+- `VEHICLE WARNING ACTIVE`: warning was confirmed and LED should be active.
+
+A video of traffic and pedestrians does not necessarily contain a near-path
+approach meeting the heuristic. Filming an existing video on a monitor with
+Nicla's grayscale 320×240 camera further reduces detection quality. Before
+changing sensitivity, **capture the debug output** to determine the issue.
+
+### Direct MP4 test when a car-person warning does not appear
+
+If the Nicla sees `PEOPLE 3 | CARS 0` repeatedly while filming a screen,
+analyse the **original colour video directly**. This uses the same
+`PredictiveMotionMonitor` as the live Nicla path, but bypasses the
+320x240 grayscale camera and USB transport.
+
+1. Download the source MP4 (for example from Pexels) into `data/pedestrians.mp4`.
+2. With the same Python virtual environment and dependencies:
+
+```powershell
+python -m edge.nicla_video_test --video data/pedestrians.mp4 --motion-debug
+```
+
+Optional: keep an annotated video of the prediction:
+
+```powershell
+python -m edge.nicla_video_test --video data/pedestrians.mp4 --motion-debug --save data/analysed_pedestrians.mp4
+```
+
+The script processes source **video timestamps**, rather than wall clock,
+and samples approximately 8 colour frames per source second by default.
+It displays person/car tracks, movement arrows, and the same diagnostics
+as `--motion-debug`. It reports the number of **confirmed** approach
+warnings, if any, at completion.
+
+This script is an offline debugging convenience. It does not require a
+connected Nicla and does **not** send red-LED warnings or events to the
+backend. Even with full-resolution input, busy crossing footage may have
+**no** paths meeting the approach criteria. It is not evidence that
+an actual collision was imminent.
+
+## Autonomous vehicle-to-worker prediction (current experimental version)
+
+**No marked road, crossing or restricted zone is required for vehicle-to-person
+approach detection.** This is appropriate for moving vehicles at construction
+sites, loading bays and temporary works areas where a road polygon is not
+available or would be impractical.
+
+The Nicla/MP4 predictor now tracks **people, cars, buses and trucks** using
+the standard COCO classes 0, 2, 5 and 7. It estimates short-horizon image-space
+motion using multiple frames, requires sustained approach toward a person,
+and compares projected **ground-contact points** (bottom-centres of the
+bounding boxes) rather than simply overlapping detection rectangles.
+It waits for two consecutive candidate frames before issuing a warning.
+This reduces some false alarms from vehicles passing pedestrians who appear
+close in an image but stand at a different visible ground level.
+
+**It is still NOT an actual 3D collision detector.** Bounding-box bottom
+points are only ground-contact approximations, not calibrated geometry.
+Perspective, occlusions, camera vibration, shadows and incorrect tracking
+can cause both false alarms and missed hazards. This cannot be used as a
+real-world safety warning device. The Nicla's ToF sensor does not measure
+distance between a specific worker and vehicle.
+
+### Test automatic prediction on the original colour MP4
+
+No mouse clicks or road-zone setup needed:
+
+```powershell
+python -m edge.nicla_video_test --video data/pedestrians.mp4 --motion-debug --save data/auto_vehicle_demo.mp4
+```
+
+The CLI prints tracked vehicle/person counts and why an alert did not fire.
+Use safely sourced staged/simulated footage that actually shows a vehicle
+converging on a worker to test positive cases. A generic urban crossing may
+not contain a genuine risk.
+
+### Test autonomous prediction on the live Nicla
+
+```powershell
+python -m edge.nicla_detector --port COM9 --no-api --predictive --motion-debug
+```
+
+Do not mark any region. This can detect a tracked car, bus or truck approaching
+a person anywhere in the camera image. A moving forklift requires a suitable
+separately trained model; the default COCO detector has no forklift class.
+
+### Optional advanced road/crossing filter
+
+For installations where a road polygon is genuinely useful, marking one is
+**optional**. A previously saved road polygon will not restrict automatic
+prediction unless the operator explicitly adds `--road-filter`.
+
+On the live camera, draw a road area using **L → mouse corners → S**, then
+restart with `--predictive --road-filter` (requires an existing saved area).
+`K` clears the optional road polygons. Ordinary restricted-zone editing
+**E → clicks → S** is unaffected.
+
+On an original MP4, `--mark-road` opens the mouse editor and **enables**
+the optional filter for that run. Later reuses of the saved polygon require
+`--road-filter` explicitly:
+
+```powershell
+python -m edge.nicla_video_test --video data/pedestrians.mp4 --motion-debug --road-filter
+```
+
+This optional filter can suppress otherwise valid warnings when users draw
+an incorrect polygon, so it is deliberately **OFF by default**.
+
+
+### Safe positive and negative predictor simulation (no real vehicles)
+
+Use this deterministic test to check the autonomous motion predictor can issue a
+warning in a **positive** scenario while staying silent in a **negative** one.
+No downloaded footage, Nicla, road marking, hardware or site are needed.
+
+```powershell
+python -m edge.nicla_motion_sim
+```
+
+The script produces two short annotated MP4s:
+
+- `data/simulations/approach.mp4` — a virtual truck approaches a stationary
+  worker on a converging projected path, so **at least one warning is expected**.
+- `data/simulations/pass.mp4` — the truck moves past a worker at a different
+  image ground-contact row, so **zero warnings are expected**.
+
+The console prints `[SIM HAZARD]`, warning counts and `[SIM CHECK] PASS/FAIL`.
+The command exits nonzero when either scenario fails.
+
+```powershell
+Start-Process "data/simulations/approach.mp4"
+Start-Process "data/simulations/pass.mp4"
+```
+
+For a quick predictor-only test with no MP4 output or OpenCV dependency:
+
+```powershell
+python -m edge.nicla_motion_sim --no-video
+```
+
+**Test boundaries:** The simulator feeds labelled bounding boxes and stable
+tracking IDs *directly* to the actual `PredictiveMotionMonitor`. The drawn
+truck and worker are only visual illustrations of those data. The simulator
+does NOT establish that YOLO would detect the illustrations, ByteTrack would
+track real footage, Nicla can operate fast enough, or the system would warn
+correctly in a physical construction site. Keep PR #5 draft until a suitable
+safe, prerecord-ed realistic positive clip and live-camera setup are checked.

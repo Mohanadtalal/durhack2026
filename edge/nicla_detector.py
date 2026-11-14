@@ -20,6 +20,7 @@ from .nicla_extra_rules import (
 )
 from .nicla_geometry import DebouncedOccupancy
 from .nicla_recording import TimedFrameRecorder
+from .nicla_motion import PredictiveMotionMonitor
 from .nicla_usb import NiclaProtocolError, NiclaUSB
 from .zone_editor import DEFAULT_ZONE_FILE, ZoneEditor, person_in_polygon
 from .zone_rules import ZoneMonitor
@@ -27,7 +28,9 @@ from .zone_rules import ZoneMonitor
 
 def run(port, preview_only=False, no_api=False, dwell=8.0, weights="yolov8n.pt",
         zone_file=DEFAULT_ZONE_FILE, ppe_weights=None, proximity_mm=None,
-        record_path=None, retry_seconds=2.0):
+        record_path=None, retry_seconds=2.0, predictive=False, sharp_zone_ids=(),
+        motion_debug=False, road_file="data/nicla_road_conflicts.json",
+        road_filter=False):
     import cv2
     import numpy as np
     from .client import send_event, flush_pending
@@ -36,6 +39,14 @@ def run(port, preview_only=False, no_api=False, dwell=8.0, weights="yolov8n.pt",
         raise ValueError("retry_seconds must be at least 0.5")
     if preview_only and ppe_weights:
         raise ValueError("Remove --preview-only when using a PPE model.")
+    if preview_only and predictive:
+        raise ValueError("Predictive motion analysis requires YOLO; remove --preview-only.")
+    if any(index < 1 for index in sharp_zone_ids):
+        raise ValueError("Sharp zone indices start at 1.")
+    if sharp_zone_ids and not predictive:
+        raise ValueError("Marking a sharp zone requires --predictive.")
+    if motion_debug and not predictive:
+        raise ValueError("Motion diagnostics require --predictive.")
 
     person_model = None
     ppe_model = None
@@ -54,6 +65,13 @@ def run(port, preview_only=False, no_api=False, dwell=8.0, weights="yolov8n.pt",
         print("[PPE] Supported missing-equipment classes:", sorted(classes))
 
     editor = ZoneEditor(zone_file)
+    road_editor = ZoneEditor(road_file)
+    if road_filter and not road_editor.zones:
+        raise ValueError("--road-filter needs a saved road area. First draw one "
+                         "with L, clicks and S in normal --predictive mode.")
+    active_editor = editor
+    predictor = PredictiveMotionMonitor() if predictive else None
+    sharp_zone_ids = set(sharp_zone_ids)
     occupancies = [DebouncedOccupancy(2) for _ in editor.zones]
     monitors = [ZoneMonitor(dwell_seconds=dwell) for _ in editor.zones]
     ppe_states = {kind: DebouncedOccupancy(2) for kind in PPE_HAZARDS}
@@ -64,13 +82,14 @@ def run(port, preview_only=False, no_api=False, dwell=8.0, weights="yolov8n.pt",
     recording = None
     nframes = 0
     t0 = time.monotonic()
+    last_motion_debug_log = 0.0
     window = "SiteGuardian: Nicla Vision"
     frame_size = [320, 240]
     running = True
 
     def on_mouse(event, x, y, flags, userdata):
         if event == cv2.EVENT_LBUTTONDOWN:
-            editor.add_corner(x, y, frame_size[0], frame_size[1])
+            active_editor.add_corner(x, y, frame_size[0], frame_size[1])
 
     def report(hazard_type, zone_id, severity="warning", metadata=None):
         print("[HAZARD]", hazard_type, "|", zone_id)
@@ -93,8 +112,21 @@ def run(port, preview_only=False, no_api=False, dwell=8.0, weights="yolov8n.pt",
         })
 
     print("Opening Nicla Vision:", port, "| close OpenMV IDE first")
-    print("Keys: E add zone, left-click corners, S save, U undo, C cancel, R clear, Q quit.")
-    print("Loaded", len(editor.zones), "zones from", editor.path)
+    print("Keys: E danger zone, L road zone, left-click corners, S save, U undo, C cancel,")
+    print("R clear danger zones, K clear road zones, Q quit.")
+    print("Loaded", len(editor.zones), "danger zones from", editor.path)
+    print("[ROAD] Loaded", len(road_editor.zones), "vehicle conflict areas from",
+          road_editor.path)
+    if predictor:
+        print("[PREDICT] Tracking persons and cars, warning on converging image paths.")
+        if sharp_zone_ids:
+            print("[PREDICT] Manually marked sharp-prop zones:", sorted(sharp_zone_ids))
+            print("[PREDICT] This does NOT detect sharp objects or verify walking backward.")
+        print("[PREDICT] Use a fixed Nicla camera. Predictions are not physical collision distances.")
+        if road_filter:
+            print("[PREDICT] Optional road-region filtering ENABLED")
+        else:
+            print("[PREDICT] AUTOMATIC vehicle/worker assessment enabled - no zones required.")
     if proximity is not None:
         print("[ToF] Forward object alert threshold:", proximity.threshold_mm, "mm")
         print("[ToF] Requires updated main.py on Nicla. Does not measure person distance.")
@@ -121,22 +153,55 @@ def run(port, preview_only=False, no_api=False, dwell=8.0, weights="yolov8n.pt",
                         height, width = frame.shape[:2]
                         frame_size[:] = [width, height]
                         regions = editor.pixels(width, height)
+                        road_regions = road_editor.pixels(width, height)
                         inference_frame = frame.copy()
                         now = time.monotonic()
                         events = []
 
-                        # Person detector: existing COCO YOLO classes=[0].
+                        # Track people and cars only when predictive mode is enabled.
+                        # Standard person-only detection is unchanged by default.
                         person_boxes = []
+                        tracked = []
                         if person_model is not None:
-                            people_result = person_model.predict(
-                                inference_frame, conf=0.45, classes=[0], verbose=False
-                            )[0]
-                            person_boxes = [
-                                tuple(int(v) for v in box)
-                                for box in people_result.boxes.xyxy.cpu().numpy()
-                            ]
-                            for x1, y1, x2, y2 in person_boxes:
-                                cv2.rectangle(frame, (x1, y1), (x2, y2), (50, 220, 120), 2)
+                            if predictor is not None:
+                                people_result = person_model.track(
+                                    inference_frame, persist=True, tracker="bytetrack.yaml",
+                                    conf=0.35, classes=[0, 2, 5, 7], verbose=False
+                                )[0]
+                                boxes = people_result.boxes
+                                xyxy = boxes.xyxy.cpu().numpy()
+                                class_ids = boxes.cls.cpu().numpy()
+                                ids = (boxes.id.cpu().numpy() if boxes.id is not None
+                                       else [None] * len(xyxy))
+                                for box, class_id, track_id in zip(xyxy, class_ids, ids):
+                                    coords = tuple(int(v) for v in box)
+                                    kind = int(class_id)
+                                    ident = int(track_id) if track_id is not None else None
+                                    if ident is not None:
+                                        tracked.append((ident, kind, coords))
+                                    if kind == 0:
+                                        person_boxes.append(coords)
+                                    x1, y1, x2, y2 = coords
+                                    color = (50, 220, 120) if kind == 0 else (0, 165, 255)
+                                    cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+                                    kind_name = {0: "PERSON", 2: "CAR",
+                                                 5: "BUS", 7: "TRUCK"}.get(kind, "VEHICLE")
+                                    cv2.putText(
+                                        frame, f"{kind_name} #{ident if ident is not None else '?'}",
+                                        (x1, max(20, y1 - 4)), cv2.FONT_HERSHEY_SIMPLEX,
+                                        .35, color, 1,
+                                    )
+                            else:
+                                people_result = person_model.predict(
+                                    inference_frame, conf=0.45, classes=[0], verbose=False
+                                )[0]
+                                person_boxes = [
+                                    tuple(int(v) for v in box)
+                                    for box in people_result.boxes.xyxy.cpu().numpy()
+                                ]
+                                for x1, y1, x2, y2 in person_boxes:
+                                    cv2.rectangle(frame, (x1, y1), (x2, y2),
+                                                  (50, 220, 120), 2)
 
                         if len(regions) != len(occupancies):
                             raise RuntimeError("Zone tracker and saved zones differ.")
@@ -195,11 +260,37 @@ def run(port, preview_only=False, no_api=False, dwell=8.0, weights="yolov8n.pt",
                             if cleared:
                                 print("[ToF] Forward proximity cleared")
 
+                        # Predictive hazards are optional. Sharp prop locations
+                        # are operator-marked existing zones, NOT AI-recognised tools.
+                        if predictor is not None:
+                            marked = [(i + 1, polygon) for i, polygon in enumerate(regions)
+                                      if i + 1 in sharp_zone_ids]
+                            for prediction in predictor.update(
+                                    tracked, now, width, height, sharp_zones=marked,
+                                    road_zones=([(i + 1, poly)
+                                                 for i, poly in enumerate(road_regions)]
+                                                if road_filter else ())):
+                                if prediction.hazard_type == "vehicle_approaching_person":
+                                    zone_id = f"nicla-car-{prediction.source_id}"
+                                    extra = {"vehicle_track_id": prediction.source_id,
+                                             "person_track_id": prediction.target_id}
+                                else:
+                                    zone_id = f"nicla-zone-{prediction.target_id}"
+                                    extra = {"person_track_id": prediction.source_id,
+                                             "manually_marked_sharp_zone": prediction.target_id}
+                                events.append((
+                                    prediction.hazard_type, zone_id, "warning",
+                                    {**extra, "screen_plane_prediction": True,
+                                     "not_calibrated": True,
+                                     "horizon_seconds": round(prediction.seconds_ahead, 2)},
+                                ))
+
                         # Red LED is driven by ANY configured hazard source.
                         in_zone = any(state.inside for state in occupancies)
                         ppe_alert = any(state.inside for state in ppe_states.values())
                         tof_alert = proximity.near if proximity is not None else False
-                        should_warn = in_zone or ppe_alert or tof_alert
+                        predicted_alert = bool(predictor.active) if predictor else False
+                        should_warn = in_zone or ppe_alert or tof_alert or predicted_alert
                         if should_warn != warning_active:
                             nicla.set_warning(should_warn)
                             warning_active = should_warn
@@ -208,20 +299,75 @@ def run(port, preview_only=False, no_api=False, dwell=8.0, weights="yolov8n.pt",
                         for event_type, zone_id, severity, metadata in events:
                             report(event_type, zone_id, severity, metadata)
 
-                        # Draw each saved polygon independently.
+                        # Magenta road/crossing regions are separate from
+                        # danger zones; they don't trigger ordinary zone alerts.
+                        for i, region in enumerate(road_regions if road_filter else []):
+                            cv2.polylines(frame, [np.array(region, dtype=np.int32)],
+                                          True, (255, 80, 190), 2)
+                            rx = min(x for x, y in region)
+                            ry = min(y for x, y in region)
+                            cv2.putText(frame, f"ROAD CONFLICT {i + 1}",
+                                        (max(4, rx), max(25, ry - 5)),
+                                        cv2.FONT_HERSHEY_SIMPLEX, .34, (255, 80, 190), 1)
+
+                        # Draw each saved danger-zone polygon independently.
                         for i, region in enumerate(regions):
                             color = (0, 0, 255) if occupancies[i].inside else (0, 190, 70)
                             cv2.polylines(frame, [np.array(region, dtype=np.int32)], True, color, 2)
                             label_x = min(x for x, y in region)
                             label_y = min(y for x, y in region)
-                            cv2.putText(frame, f"ZONE {i + 1}",
+                            title = (f"MARKED SHARP ZONE {i + 1}"
+                                     if i + 1 in sharp_zone_ids else f"ZONE {i + 1}")
+                            cv2.putText(frame, title,
                                         (max(4, label_x), max(46, label_y - 7)),
-                                        cv2.FONT_HERSHEY_SIMPLEX, .47, color, 2)
+                                        cv2.FONT_HERSHEY_SIMPLEX, .40, color, 2)
                         if not regions:
                             cv2.putText(frame, "NO ZONES - press E to add", (5, 40),
                                         cv2.FONT_HERSHEY_SIMPLEX, .40, (0, 255, 255), 1)
-                        if editor.editing:
-                            draft = editor.draft_pixels(width, height)
+                        if predictor is not None:
+                            # Draw one-second, image-plane motion arrows.
+                            # They represent optical motion, not physical metres.
+                            for track in predictor.tracks.values():
+                                if track.samples < 2 or now - track.timestamp > 0.3:
+                                    continue
+                                if abs(track.vx) + abs(track.vy) < 0.025:
+                                    continue
+                                start = (
+                                    max(0, min(width - 1, int(track.xy[0] * width))),
+                                    max(0, min(height - 1, int(track.xy[1] * height))),
+                                )
+                                end = (
+                                    max(0, min(width - 1, int((track.xy[0] + track.vx) * width))),
+                                    max(0, min(height - 1, int((track.xy[1] + track.vy) * height))),
+                                )
+                                tint = (0, 170, 255) if track.class_id == 2 else (255, 220, 0)
+                                cv2.arrowedLine(frame, start, end, tint, 2, tipLength=0.25)
+                            if motion_debug:
+                                diagnostic = predictor.debug_summary
+                                cv2.putText(
+                                    frame, diagnostic[:65], (4, height - 63),
+                                    cv2.FONT_HERSHEY_SIMPLEX, .28, (0, 255, 255), 1
+                                )
+                                if now - last_motion_debug_log >= 1.5:
+                                    print("[MOTION DEBUG]", diagnostic)
+                                    last_motion_debug_log = now
+                            for n, threat in enumerate(predictor.active[:2]):
+                                if threat.hazard_type == "vehicle_approaching_person":
+                                    label = f"APPROACH: VEHICLE {threat.source_id} -> PERSON {threat.target_id}"
+                                    car = predictor.tracks.get(threat.source_id)
+                                    person = predictor.tracks.get(threat.target_id)
+                                    if car is not None and person is not None:
+                                        a = (int(car.xy[0] * width), int(car.xy[1] * height))
+                                        b = (int(person.xy[0] * width), int(person.xy[1] * height))
+                                        cv2.line(frame, a, b, (0, 0, 255), 1)
+                                else:
+                                    label = f"APPROACH: PERSON {threat.source_id} -> SHARP {threat.target_id}"
+                                cv2.putText(
+                                    frame, label, (4, height - 34 - 15 * n),
+                                    cv2.FONT_HERSHEY_SIMPLEX, .35, (0, 0, 255), 2
+                                )
+                        if active_editor.editing:
+                            draft = active_editor.draft_pixels(width, height)
                             if len(draft) >= 2:
                                 cv2.polylines(frame, [np.array(draft, dtype=np.int32)],
                                               False, (0, 255, 255), 2)
@@ -229,13 +375,14 @@ def run(port, preview_only=False, no_api=False, dwell=8.0, weights="yolov8n.pt",
                                 cv2.circle(frame, (x, y), 4, (0, 255, 255), -1)
                                 cv2.putText(frame, str(i + 1), (x + 4, y - 4),
                                             cv2.FONT_HERSHEY_SIMPLEX, .34, (0, 255, 255), 1)
-                            cv2.putText(frame, f"DRAW {len(draft)} points | S save U undo C cancel",
+                            item = "ROAD" if active_editor is road_editor else "HAZARD"
+                            cv2.putText(frame, f"DRAW {item} {len(draft)} points | S save U undo C cancel",
                                         (4, 28), cv2.FONT_HERSHEY_SIMPLEX,
                                         .33, (0, 255, 255), 1)
 
                         cv2.putText(frame,
-                                    f"{len(regions)} zones | E add S save U undo C cancel R clear Q quit",
-                                    (4, 13), cv2.FONT_HERSHEY_SIMPLEX, .31,
+                                    f"{len(regions)} hazard {len(road_regions)} road | E zone L road S save R/K clear Q quit",
+                                    (4, 13), cv2.FONT_HERSHEY_SIMPLEX, .26,
                                     (255, 255, 255), 1)
                         if proximity is not None:
                             display = "--" if distance_mm is None else str(distance_mm)
@@ -271,19 +418,31 @@ def run(port, preview_only=False, no_api=False, dwell=8.0, weights="yolov8n.pt",
                             running = False
                             break
                         if key in (ord("e"), ord("E")):
+                            road_editor.cancel()
+                            active_editor = editor
                             editor.begin()
-                            print("[ZONE] Adding zone", len(editor.zones) + 1)
-                        elif key in (ord("u"), ord("U")):
-                            editor.undo()
-                        elif key in (ord("c"), ord("C")):
+                            print("[ZONE] Drawing danger zone", len(editor.zones) + 1)
+                        elif key in (ord("l"), ord("L")):
                             editor.cancel()
+                            active_editor = road_editor
+                            road_editor.begin()
+                            print("[ROAD] Drawing vehicle conflict area",
+                                  len(road_editor.zones) + 1)
+                        elif key in (ord("u"), ord("U")):
+                            active_editor.undo()
+                        elif key in (ord("c"), ord("C")):
+                            active_editor.cancel()
                             print("[ZONE] Cancelled unsaved polygon")
-                        elif key in (ord("s"), ord("S")) and editor.editing:
+                        elif key in (ord("s"), ord("S")) and active_editor.editing:
                             try:
-                                if editor.save():
-                                    occupancies.append(DebouncedOccupancy(2))
-                                    monitors.append(ZoneMonitor(dwell_seconds=dwell))
-                                    print("[ZONE] Saved zone", len(editor.zones))
+                                if active_editor.save():
+                                    if active_editor is editor:
+                                        occupancies.append(DebouncedOccupancy(2))
+                                        monitors.append(ZoneMonitor(dwell_seconds=dwell))
+                                        print("[ZONE] Saved danger zone", len(editor.zones))
+                                    else:
+                                        print("[ROAD] Saved road conflict area",
+                                              len(road_editor.zones))
                             except (OSError, ValueError) as exc:
                                 print("[ZONE] Save failed:", exc)
                         elif key in (ord("r"), ord("R")):
@@ -291,9 +450,15 @@ def run(port, preview_only=False, no_api=False, dwell=8.0, weights="yolov8n.pt",
                                 editor.reset()
                                 occupancies.clear()
                                 monitors.clear()
-                                print("[ZONE] Cleared all zones")
+                                print("[ZONE] Cleared danger zones")
                             except OSError as exc:
                                 print("[ZONE] Clear failed:", exc)
+                        elif key in (ord("k"), ord("K")):
+                            try:
+                                road_editor.reset()
+                                print("[ROAD] Cleared all road conflict areas")
+                            except OSError as exc:
+                                print("[ROAD] Clear failed:", exc)
             except (NiclaProtocolError, OSError) as exc:
                 if not running:
                     break
@@ -305,6 +470,12 @@ def run(port, preview_only=False, no_api=False, dwell=8.0, weights="yolov8n.pt",
                 occupancies = [DebouncedOccupancy(2) for _ in editor.zones]
                 monitors = [ZoneMonitor(dwell_seconds=dwell) for _ in editor.zones]
                 ppe_states = {kind: DebouncedOccupancy(2) for kind in PPE_HAZARDS}
+                if predictor is not None:
+                    predictor.reset()
+                    # Tracker IDs must not persist across separate USB sessions.
+                    if person_model is not None and getattr(person_model, "predictor", None):
+                        for tracker in getattr(person_model.predictor, "trackers", []):
+                            tracker.reset()
                 proximity = ProximityAlert(proximity_mm) if proximity_mm is not None else None
                 distance_mm = None
                 deadline = time.monotonic() + retry_seconds
@@ -337,11 +508,22 @@ def main():
     parser.add_argument("--proximity-mm", type=int, help="Optional forward ToF alert threshold, 50-4000 mm")
     parser.add_argument("--record", help="Record annotated video to an MP4 path, e.g. data/demo.mp4")
     parser.add_argument("--retry-seconds", type=float, default=2.0, help="Retry USB after disconnect")
+    parser.add_argument("--predictive", action="store_true",
+                        help="Track cars and people to warn on converging image-plane paths")
+    parser.add_argument("--sharp-zone", type=int, action="append", default=[],
+                        help="Saved zone index containing a manually marked sharp prop; repeatable")
+    parser.add_argument("--motion-debug", action="store_true",
+                        help="Show why an approaching-car warning is not firing; requires --predictive")
+    parser.add_argument("--road-file", default="data/nicla_road_conflicts.json",
+                        help="Separate, optional vehicle/pedestrian conflict area polygons")
+    parser.add_argument("--road-filter", action="store_true",
+                        help="Optional marked-road filtering; OFF by default; needs a saved polygon")
     args = parser.parse_args()
     try:
         run(args.port, args.preview_only, args.no_api, args.dwell, args.weights,
             args.zone_file, args.ppe_weights, args.proximity_mm,
-            args.record, args.retry_seconds)
+            args.record, args.retry_seconds, args.predictive, args.sharp_zone,
+            args.motion_debug, args.road_file, args.road_filter)
     except KeyboardInterrupt:
         print("[EXIT] Interrupted by user")
 
