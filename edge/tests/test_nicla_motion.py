@@ -69,3 +69,24 @@ def test_two_frames_required_for_alert():
     for i in range(2):
         assert monitor.update([(10, 2, box(60+i*20, 180)), person],
                               70+i*0.25, 320, 240) == []
+
+
+def test_person_approaching_parked_car_is_not_vehicle_alert():
+    # A moving person cannot make a stationary car appear to approach them.
+    monitor = PredictiveMotionMonitor()
+    events = []
+    for i in range(5):
+        events.extend(monitor.update(
+            [(10, 2, box(210, 180)), (20, 0, box(30 + i * 35, 180))],
+            80 + 0.25 * i, 320, 240))
+    assert not any(e.hazard_type == "vehicle_approaching_person" for e in events)
+
+
+def test_unmarked_sharp_region_never_triggers():
+    monitor = PredictiveMotionMonitor()
+    events = []
+    for i in range(5):
+        events.extend(monitor.update(
+            [(5, 0, box(65 + i * 30, 180))],
+            95 + 0.25 * i, 320, 240))
+    assert not events

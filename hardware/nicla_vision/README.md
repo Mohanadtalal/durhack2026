@@ -232,3 +232,67 @@ in millimetres or `DISTANCE: None` if the ToF sensor is unavailable.
 If VERSION times out, the running board script is still old or did not
 reload. If the marker appears but DIST fails, capture the full error and
 isolate the ToF code without changing the known-good raw camera path.
+
+## Predictive motion hazards (optional, experimental)
+
+This mode attempts **early warnings before image-space paths meet**. It uses
+Ultralytics ByteTrack persistent track IDs and 2D movement history; it
+requires a **fixed/mounted camera** and works without any firmware changes.
+
+### Case A: Car moving toward a person
+
+```powershell
+python -m edge.nicla_detector --port COM9 --no-api --predictive
+```
+
+The default person YOLO detects COCO class 0 (person) and class 2 (car).
+ByteTrack assigns IDs such as `PERSON #2` and `CAR #5`. After at least two
+consecutive consistent approaching predictions, the overlay warns
+`APPROACH: CAR 5 -> PERSON 2` and activates the red Nicla LED.
+The terminal prints `vehicle_approaching_person`.
+Stationary cars and vehicles moving away are ignored by the prediction logic.
+
+This is a **screen-plane path-convergence heuristic** using box bottom-centres,
+not physically calibrated time-to-collision, 3D velocity or a collision
+probability. Camera shake, object scale changes and perspective may create
+incorrect warnings, and small/toy cars may not be recognised by COCO YOLO.
+
+### Case B: Person moving toward a manually marked sharp hazard
+
+You must manually locate a harmless **sharp-object stand-in** (such as a
+cardboard sign or foam prop) by creating a zone with **E → clicks → S**.
+Do not use actual sharp or dangerous objects during tests.
+
+```powershell
+python -m edge.nicla_detector --port COM9 --no-api --predictive --sharp-zone 1
+```
+
+This designates saved zone 1 as the place where an operator identified a
+potential sharp hazard. Other zones can be marked with repeated
+`--sharp-zone 2` arguments. You may draw the zone after starting the
+program. The program predicts when the person's box-footpoint trajectory
+moves toward that region, shows
+`APPROACH: PERSON 2 -> SHARP ZONE 1`, and emits
+`person_approaching_marked_sharp_zone` once confirmed.
+
+**Important: the current program does NOT automatically recognise all sharp
+objects or distinguish backward walking from forward/sideways movement.**
+It warns on movement *toward a manually marked hazard*. Actual backward
+motion classification needs a separately validated pose/orientation system
+and sufficiently clear frames. Do not demonstrate this as a verified
+`walking backward` classifier.
+
+You can combine prediction with PPE and ToF and record an annotated demo:
+
+```powershell
+python -m edge.nicla_detector --port COM9 --no-api --predictive --sharp-zone 1 --proximity-mm 800 --ppe-weights data/models/buildvision-hazards-v0.3.pt --record data/predictive_demo.mp4
+```
+
+The predicted hazards use the existing event shape, with the corresponding
+camera-track IDs and `screen_plane_prediction: true` metadata. Events can
+be sent to the backend by removing `--no-api` after integration testing.
+
+**Safety:** Never stage a real vehicle approaching a person or use a sharp
+object to test this. Use prerecorded consented footage or harmless props.
+This is a hackathon proof of concept, not a tested collision-avoidance
+system or emergency alarm.
