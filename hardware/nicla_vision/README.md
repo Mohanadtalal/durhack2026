@@ -328,3 +328,35 @@ A video of traffic and pedestrians does not necessarily contain a near-path
 approach meeting the heuristic. Filming an existing video on a monitor with
 Nicla's grayscale 320×240 camera further reduces detection quality. Before
 changing sensitivity, **capture the debug output** to determine the issue.
+
+### Direct MP4 test when a car-person warning does not appear
+
+If the Nicla sees `PEOPLE 3 | CARS 0` repeatedly while filming a screen,
+analyse the **original colour video directly**. This uses the same
+`PredictiveMotionMonitor` as the live Nicla path, but bypasses the
+320x240 grayscale camera and USB transport.
+
+1. Download the source MP4 (for example from Pexels) into `data/pedestrians.mp4`.
+2. With the same Python virtual environment and dependencies:
+
+```powershell
+python -m edge.nicla_video_test --video data/pedestrians.mp4 --motion-debug
+```
+
+Optional: keep an annotated video of the prediction:
+
+```powershell
+python -m edge.nicla_video_test --video data/pedestrians.mp4 --motion-debug --save data/analysed_pedestrians.mp4
+```
+
+The script processes source **video timestamps**, rather than wall clock,
+and samples approximately 8 colour frames per source second by default.
+It displays person/car tracks, movement arrows, and the same diagnostics
+as `--motion-debug`. It reports the number of **confirmed** approach
+warnings, if any, at completion.
+
+This script is an offline debugging convenience. It does not require a
+connected Nicla and does **not** send red-LED warnings or events to the
+backend. Even with full-resolution input, busy crossing footage may have
+**no** paths meeting the approach criteria. It is not evidence that
+an actual collision was imminent.
