@@ -41,7 +41,9 @@ class TimedFrameRecorder:
         elif at < self._previous_time:
             raise ValueError("Frame timestamps must not go backwards")
         elif self._paused_at is not None:
-            self._start += max(0.0, at - self._paused_at)
+            # Restart the output timeline at its next frame slot so the
+            # first image after reconnect is included, with no frozen outage.
+            self._start = at - self.frames_written / self.fps
             self._paused_at = None
         elif at - self._previous_time > self.max_gap_seconds:
             # Limit frozen footage after unexpected long capture stalls.

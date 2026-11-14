@@ -45,7 +45,7 @@ def test_usb_outage_is_not_recorded_as_long_frozen_gap():
     recording.write("before2", 0.2)
     recording.pause(0.25)
     recording.write("after", 40.25)
-    assert writer.frames == ["before", "before", "after"]
+    assert writer.frames == ["before", "before", "before2", "after"]
 
 
 def test_unexpected_stall_is_capped_at_two_seconds():
