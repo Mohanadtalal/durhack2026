@@ -10,6 +10,7 @@ Extra features (independently opt in):
 All warnings are prototype demonstrations, not certified construction alarms.
 """
 import argparse
+import os
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -22,6 +23,7 @@ from .nicla_geometry import DebouncedOccupancy
 from .nicla_recording import TimedFrameRecorder
 from .nicla_motion import PredictiveMotionMonitor
 from .nicla_usb import NiclaProtocolError, NiclaUSB
+from .uno_q_warning import UnoQWarning
 from .preview_server import PreviewServer, zones_for_editor
 from .zone_editor import DEFAULT_ZONE_FILE, ZoneEditor, person_in_polygon
 from .zone_rules import ZoneMonitor
@@ -31,7 +33,8 @@ def run(port, preview_only=False, no_api=False, dwell=8.0, weights="yolov8n.pt",
         zone_file=DEFAULT_ZONE_FILE, ppe_weights=None, proximity_mm=None,
         record_path=None, retry_seconds=2.0, predictive=False, sharp_zone_ids=(),
         motion_debug=False, road_file="data/nicla_road_conflicts.json",
-        road_filter=False, stream_port=None, stream_host="127.0.0.1"):
+        road_filter=False, stream_port=None, stream_host="127.0.0.1",
+        uno_q_url=None):
     import cv2
     import numpy as np
     from .client import send_event, flush_pending
@@ -88,6 +91,9 @@ def run(port, preview_only=False, no_api=False, dwell=8.0, weights="yolov8n.pt",
     frame_size = [320, 240]
     running = True
     preview = None
+    uno_q = UnoQWarning(uno_q_url) if uno_q_url else None
+    if uno_q is not None:
+        print("[UNO Q] Mirroring Nicla warnings to", uno_q.base_url)
 
     def on_mouse(event, x, y, flags, userdata):
         if event == cv2.EVENT_LBUTTONDOWN:
@@ -153,6 +159,8 @@ def run(port, preview_only=False, no_api=False, dwell=8.0, weights="yolov8n.pt",
                     if not nicla.ping():
                         raise NiclaProtocolError("Nicla did not reply PONG")
                     nicla.set_warning(False, force=True)
+                    if uno_q is not None:
+                        uno_q.set_state(False)
                     print("[USB] Connected and responding on", port)
                     warning_active = False
                     last_distance_poll = 0.0
@@ -302,6 +310,9 @@ def run(port, preview_only=False, no_api=False, dwell=8.0, weights="yolov8n.pt",
                         tof_alert = proximity.near if proximity is not None else False
                         predicted_alert = bool(predictor.active) if predictor else False
                         should_warn = in_zone or ppe_alert or tof_alert or predicted_alert
+                        if uno_q is not None:
+                            # Nonblocking: latest state wins; periodic sync survives UNO Q restarts.
+                            uno_q.set_state(should_warn)
                         if should_warn != warning_active:
                             nicla.set_warning(should_warn)
                             warning_active = should_warn
@@ -483,7 +494,9 @@ def run(port, preview_only=False, no_api=False, dwell=8.0, weights="yolov8n.pt",
                 if recording is not None:
                     recording.pause(time.monotonic())
                 print("[USB] Connection lost:", exc, "- retrying every", retry_seconds, "seconds")
-                # State is unknown after a broken link. Re-arm detection on reconnect.
+                # Mirror Nicla reset on disconnect; unknown camera state is not safety assurance.
+                if uno_q is not None:
+                    uno_q.set_state(False)
                 warning_active = False
                 occupancies = [DebouncedOccupancy(2) for _ in editor.zones]
                 monitors = [ZoneMonitor(dwell_seconds=dwell) for _ in editor.zones]
@@ -502,6 +515,8 @@ def run(port, preview_only=False, no_api=False, dwell=8.0, weights="yolov8n.pt",
                         running = False
                         break
     finally:
+        if uno_q is not None:
+            uno_q.close()
         if preview is not None:
             preview.close()
         if recording is not None:
@@ -542,13 +557,15 @@ def main():
                         help="Expose annotated MJPEG and configured zones for local dashboard, e.g. 8765")
     parser.add_argument("--stream-host", default="127.0.0.1",
                         help="Stream HTTP bind address; default loopback only (no authentication)")
+    parser.add_argument("--uno-q-url", default=os.getenv("UNO_Q_URL", ""),
+                        help="Optional UNO Q App Lab URL via ADB: http://127.0.0.1:7000")
     args = parser.parse_args()
     try:
         run(args.port, args.preview_only, args.no_api, args.dwell, args.weights,
             args.zone_file, args.ppe_weights, args.proximity_mm,
             args.record, args.retry_seconds, args.predictive, args.sharp_zone,
             args.motion_debug, args.road_file, args.road_filter,
-            args.stream_port, args.stream_host)
+            args.stream_port, args.stream_host, args.uno_q_url)
     except KeyboardInterrupt:
         print("[EXIT] Interrupted by user")
 
