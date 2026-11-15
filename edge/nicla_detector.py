@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
+from .async_events import AsyncEventReporter
 from .nicla_extra_rules import (
     PPE_HAZARDS, ProximityAlert, extract_ppe_hazards, supported_ppe_classes,
 )
@@ -34,10 +35,9 @@ def run(port, preview_only=False, no_api=False, dwell=8.0, weights="yolov8n.pt",
         record_path=None, retry_seconds=2.0, predictive=False, sharp_zone_ids=(),
         motion_debug=False, road_file="data/nicla_road_conflicts.json",
         road_filter=False, stream_port=None, stream_host="127.0.0.1",
-        uno_q_url=None):
+        uno_q_url=None, profile_latency=False):
     import cv2
     import numpy as np
-    from .client import send_event, flush_pending
 
     if retry_seconds < 0.5:
         raise ValueError("retry_seconds must be at least 0.5")
@@ -94,6 +94,8 @@ def run(port, preview_only=False, no_api=False, dwell=8.0, weights="yolov8n.pt",
     running = True #controls camera loop continution 
     preview = None # variable holds the streaming server 
 
+    reporter = AsyncEventReporter() if not no_api else None
+    last_latency_log = 0.0
     uno_q = UnoQWarning(uno_q_url) if uno_q_url else None
     if uno_q is not None:
         print("[UNO Q] Mirroring Nicla warnings to", uno_q.base_url)
@@ -114,7 +116,7 @@ def run(port, preview_only=False, no_api=False, dwell=8.0, weights="yolov8n.pt",
         print("[HAZARD]", hazard_type, "|", zone_id)
         if no_api:
             return
-        send_event({
+        accepted = reporter.submit({
             "event_id": str(uuid4()),
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "source_id": "nicla-vision-01",
@@ -129,6 +131,8 @@ def run(port, preview_only=False, no_api=False, dwell=8.0, weights="yolov8n.pt",
                 **(metadata or {}),
             },
         }, snapshot_jpeg=snapshot_jpeg)
+        if not accepted:
+            print('[EVENT BUFFER FULL] Alert could not be queued:', hazard_type)
 
     print("Opening Nicla Vision:", port, "| close OpenMV IDE first")
     print("Keys: E danger zone, L road zone, left-click corners, S save, U undo, C cancel,")
@@ -179,7 +183,9 @@ def run(port, preview_only=False, no_api=False, dwell=8.0, weights="yolov8n.pt",
 
                     #keeps camera tracking system running
                     while running:
+                        frame_started_at = time.perf_counter()
                         raw = nicla.snapshot_gray()
+                        capture_finished_at = time.perf_counter()
                         gray = np.frombuffer(raw, dtype=np.uint8).reshape((240, 320))
                         frame = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
                         height, width = frame.shape[:2]
@@ -350,6 +356,7 @@ def run(port, preview_only=False, no_api=False, dwell=8.0, weights="yolov8n.pt",
                         tof_alert = proximity.near if proximity is not None else False
                         predicted_alert = bool(predictor.active) if predictor else False
                         should_warn = in_zone or ppe_alert or tof_alert or predicted_alert
+                        analysis_finished_at = time.perf_counter()
                         if uno_q is not None:
                             # Nonblocking: latest state wins; periodic sync survives UNO Q restarts.
                             uno_q.set_state(should_warn)
@@ -357,6 +364,7 @@ def run(port, preview_only=False, no_api=False, dwell=8.0, weights="yolov8n.pt",
                             nicla.set_warning(should_warn)
                             warning_active = should_warn
                             print("[LOCAL LED]", "RED - hazard present" if should_warn else "OFF - clear")
+                        warning_finished_at = time.perf_counter()
 
                         # Capture the *same* camera frame that caused the alert.
                         # Encode once even if multiple incident rules fire together.
@@ -373,6 +381,7 @@ def run(port, preview_only=False, no_api=False, dwell=8.0, weights="yolov8n.pt",
                         for event_type, zone_id, severity, metadata in events:
                             report(event_type, zone_id, severity, metadata,
                                    snapshot_jpeg=evidence_jpg)
+                        reporting_finished_at = time.perf_counter()
 
                         # Magenta road/crossing regions are separate from
                         # danger zones; they don't trigger ordinary zone alerts.
@@ -491,6 +500,24 @@ def run(port, preview_only=False, no_api=False, dwell=8.0, weights="yolov8n.pt",
                             preview.publish_frame(frame)
                         cv2.imshow(window, frame)
                         key = cv2.waitKey(1) & 0xFF
+                        if profile_latency:
+                            finished_at = time.perf_counter()
+                            frame_ms = (finished_at - frame_started_at) * 1000
+                            if frame_ms >= 200 and finished_at - last_latency_log >= 1.0:
+                                last_latency_log = finished_at
+                                print(
+                                    "[LATENCY] total={:.0f}ms usb={:.0f}ms analysis={:.0f}ms "
+                                    "led={:.0f}ms events={:.0f}ms render={:.0f}ms count={} "
+                                    "warning={}".format(
+                                        frame_ms,
+                                        (capture_finished_at - frame_started_at) * 1000,
+                                        (analysis_finished_at - capture_finished_at) * 1000,
+                                        (warning_finished_at - analysis_finished_at) * 1000,
+                                        (reporting_finished_at - warning_finished_at) * 1000,
+                                        (finished_at - reporting_finished_at) * 1000,
+                                        len(events), should_warn,
+                                    )
+                                )
                         if key in (ord("q"), ord("Q")):
                             running = False
                             break
@@ -578,6 +605,8 @@ def run(port, preview_only=False, no_api=False, dwell=8.0, weights="yolov8n.pt",
                         running = False
                         break
     finally:
+        if reporter is not None:
+            reporter.close()
         if uno_q is not None:
             uno_q.close()
         if preview is not None:
@@ -587,11 +616,6 @@ def run(port, preview_only=False, no_api=False, dwell=8.0, weights="yolov8n.pt",
             print(f"[RECORD] Saved {recording.duration_seconds:.1f}s of video "
                   f"({recording.frames_written} frames) to {record_path}")
         cv2.destroyAllWindows()
-        if not no_api:
-            try:
-                flush_pending()
-            except Exception as exc:
-                print("[QUEUE] Pending events remain unsent:", exc)
 
 
 def main():
@@ -622,13 +646,16 @@ def main():
                         help="Stream HTTP bind address; default loopback only (no authentication)")
     parser.add_argument("--uno-q-url", default=os.getenv("UNO_Q_URL", ""),
                         help="Optional UNO Q App Lab URL via ADB: http://127.0.0.1:7000")
+    parser.add_argument("--profile-latency", action="store_true",
+                        help="Log slow frames by stage (USB, detection, LED, reporting, preview)")
     args = parser.parse_args()
     try:
         run(args.port, args.preview_only, args.no_api, args.dwell, args.weights,
             args.zone_file, args.ppe_weights, args.proximity_mm,
             args.record, args.retry_seconds, args.predictive, args.sharp_zone,
             args.motion_debug, args.road_file, args.road_filter,
-            args.stream_port, args.stream_host, args.uno_q_url)
+            args.stream_port, args.stream_host, args.uno_q_url,
+            args.profile_latency)
     except KeyboardInterrupt:
         print("[EXIT] Interrupted by user")
 
