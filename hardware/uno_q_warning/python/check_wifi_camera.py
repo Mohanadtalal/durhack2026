@@ -10,10 +10,12 @@ from urllib.request import urlopen
 def read_first_jpeg(stream, max_bytes=2_000_000):
     """Extract JPEG SOI..EOI from an MJPEG stream without saving footage."""
     received = bytearray()
-    while len(received) < max_bytes:
-        chunk = stream.read(min(4096, max_bytes - len(received)))
+    total_received = 0
+    while total_received < max_bytes:
+        chunk = stream.read(min(4096, max_bytes - total_received))
         if not chunk:
             raise ConnectionError("Camera stream ended before a complete JPEG frame")
+        total_received += len(chunk)
         received.extend(chunk)
         start = received.find(b"\xff\xd8")
         if start < 0:
