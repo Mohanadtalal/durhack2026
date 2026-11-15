@@ -17,6 +17,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from .async_events import AsyncEventReporter
+from .camera_controls import clear_saved_camera_boxes
 from .nicla_extra_rules import (
     PPE_HAZARDS, ProximityAlert, extract_ppe_hazards, supported_ppe_classes,
 )
@@ -181,8 +182,30 @@ def run(port, preview_only=False, no_api=False, dwell=8.0, weights="yolov8n.pt",
                     last_distance_poll = 0.0
 
 
+                    # Camera controls are consumed here, never from the HTTP worker.
+                    # This keeps ZoneEditor, tracker and video state single-threaded.
                     #keeps camera tracking system running
                     while running:
+                        if preview is not None:
+                            for control in preview.take_controls():
+                                if control == "reset-boxes":
+                                    try:
+                                        clear_saved_camera_boxes(
+                                            editor, road_editor, occupancies, monitors, preview
+                                        )
+                                    except OSError as exc:
+                                        print("[BOX RESET] Could not remove saved zones:", exc)
+                                        continue
+                                    object_tracker = None
+                                    tracked_box = None
+                                    tracking_active = False
+                                    active_editor = editor
+                                    preview.hub.set_boxes_visible(False)
+                                    print("[BOX RESET] Saved zones and manual box cleared. "
+                                          "Detection and warning rules still running.")
+                                elif control == "show-boxes":
+                                    preview.hub.set_boxes_visible(True)
+                                    print("[BOX RESET] Live detection overlays visible again.")
                         frame_started_at = time.perf_counter()
                         raw = nicla.snapshot_gray()
                         capture_finished_at = time.perf_counter()
@@ -481,6 +504,11 @@ def run(port, preview_only=False, no_api=False, dwell=8.0, weights="yolov8n.pt",
                         cv2.putText(frame, f"Nicla USB | {fps:.1f} fps",
                                     (5, height - 8), cv2.FONT_HERSHEY_SIMPLEX,
                                     .45, (255, 255, 255), 1)
+
+                        # Clearing boxes hides all visual overlays, not the AI itself.
+                        # The original frame is used for preview and recording.
+                        if preview is not None and not preview.hub.boxes_visible():
+                            frame = inference_frame.copy()
 
                         if record_path:
                             if recording is None:

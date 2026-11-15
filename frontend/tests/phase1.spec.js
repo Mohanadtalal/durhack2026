@@ -85,3 +85,18 @@ test('alert snapshot is uploaded, linked and visible in the control centre', asy
     img => img.complete && img.naturalWidth > 0
   )).toBe(true)
 })
+
+
+
+test('reset all boxes button requires confirmation before sending camera control', async ({ page }) => {
+  await page.goto('/')
+  await page.getByRole('button', { name: 'Open the dashboard' }).click()
+  await expect(page.getByRole('button', { name: 'Reset all boxes' })).toBeVisible()
+  const requests = []
+  page.on('request', r => {
+    if (r.url().includes('/controls/reset-boxes')) requests.push(r.url())
+  })
+  page.once('dialog', dialog => dialog.dismiss())
+  await page.getByRole('button', { name: 'Reset all boxes' }).click()
+  expect(requests).toEqual([])
+})
