@@ -135,6 +135,10 @@ def run(port, preview_only=False, no_api=False, dwell=8.0, weights="yolov8n.pt",
         print("[UNO Q] Mirroring Nicla warnings to", uno_q.base_url)
 
 
+        # Moving danger zone tracking
+    trackers = []
+    tracking_margin = 30
+
     #function runs when you interact with camera window with mous e
     def on_mouse(event, x, y, flags, userdata):
         if event == cv2.EVENT_LBUTTONDOWN:
@@ -241,6 +245,33 @@ def run(port, preview_only=False, no_api=False, dwell=8.0, weights="yolov8n.pt",
                         frame = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
                         height, width = frame.shape[:2]
 
+
+
+                    active_trackers = []
+
+                    for tracker in trackers:
+                        success, tracked_box = tracker.update(frame)
+
+                        if success:
+                            x, y, w, h = map(int, tracked_box)
+
+                            x1 = max(0, x - tracking_margin)
+                            y1 = max(0, y - tracking_margin)
+                            x2 = min(width - 1, x + w + tracking_margin)
+                            y2 = min(height - 1, y + h + tracking_margin)
+
+                            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 2)
+
+                            active_trackers.append(tracker)
+
+                        else:
+                            print("Lost tracking for one object")
+
+                        trackers = active_trackers
+
+
+
+                     
 
 
                         frame_size[:] = [width, height]
@@ -600,6 +631,19 @@ def run(port, preview_only=False, no_api=False, dwell=8.0, weights="yolov8n.pt",
                         if key in (ord("q"), ord("Q")):
                             running = False
                             break
+                        if key in (ord("t"), ord("T")):
+                            tracked_box = cv2.selectROI(window, frame, False, False)
+
+                            if tracked_box[2] > 0 and tracked_box[3] > 0:
+                                tracker = cv2.legacy.TrackerCSRT_create()
+                                tracker.init(frame, tracked_box)
+                                trackers.append(tracker)
+                                print("Total objects:", len(trackers))
+
+                        if key in (ord("b"), ord("B")):
+                             trackers.clear()
+                             print("All trackers reset!")
+                                                            
 
                         if key in (ord("e"), ord("E")):
                             road_editor.cancel()
