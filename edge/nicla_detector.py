@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
+from .auto_hazards import HazardMonitor, find_hazards, parse_labels
 from .async_events import AsyncEventReporter
 from .camera_controls import clear_saved_camera_boxes
 from .nicla_extra_rules import (
@@ -36,7 +37,8 @@ def run(port, preview_only=False, no_api=False, dwell=8.0, weights="yolov8n.pt",
         record_path=None, retry_seconds=2.0, predictive=False, sharp_zone_ids=(),
         motion_debug=False, road_file="data/nicla_road_conflicts.json",
         road_filter=False, stream_port=None, stream_host="127.0.0.1",
-        uno_q_url=None, profile_latency=False):
+        uno_q_url=None, profile_latency=False, auto_hazards=False,
+        hazard_weights=None, hazard_labels="knife", hazard_confidence=0.45):
     import cv2
     import numpy as np
 
@@ -44,6 +46,8 @@ def run(port, preview_only=False, no_api=False, dwell=8.0, weights="yolov8n.pt",
         raise ValueError("retry_seconds must be at least 0.5")
     if preview_only and ppe_weights:
         raise ValueError("Remove --preview-only when using a PPE model.")
+    if preview_only and auto_hazards:
+        raise ValueError("Automatic object recognition requires a YOLO model; remove --preview-only.")
     if preview_only and predictive:
         raise ValueError("Predictive motion analysis requires YOLO; remove --preview-only.")
     if any(index < 1 for index in sharp_zone_ids):
@@ -55,6 +59,9 @@ def run(port, preview_only=False, no_api=False, dwell=8.0, weights="yolov8n.pt",
 
     person_model = None
     ppe_model = None
+    hazard_model = None
+    hazard_monitor = HazardMonitor() if auto_hazards else None
+    wanted_hazards = parse_labels(hazard_labels) if auto_hazards else ()
     if not preview_only:
         from ultralytics import YOLO
         print("[MODEL] Loading person detector:", weights)
@@ -68,6 +75,32 @@ def run(port, preview_only=False, no_api=False, dwell=8.0, weights="yolov8n.pt",
             raise ValueError("PPE model has no explicit no_helmet/no_vest classes. "
                              "Generic COCO person weights cannot detect missing PPE.")
         print("[PPE] Supported missing-equipment classes:", sorted(classes))
+
+    if auto_hazards:
+        # COCO person/vehicle weights cannot recognise knives. Use explicit
+        # open-vocabulary weights or a separately trained knife detector.
+        if hazard_weights:
+            from ultralytics import YOLO
+            hazard_model = YOLO(hazard_weights)
+            available = {str(v).strip().casefold()
+                         for v in hazard_model.names.values()} if isinstance(
+                             hazard_model.names, dict) else {
+                                 str(v).strip().casefold() for v in hazard_model.names}
+            missing = set(wanted_hazards) - available
+            if missing:
+                raise ValueError(
+                    f"Hazard weights lack requested labels {sorted(missing)}. "
+                    "Train a detector with these classes or omit --hazard-weights "
+                    "to use YOLO-World."
+                )
+            print("[AUTO HAZARD] Custom knife-capable model:", hazard_weights)
+        else:
+            from ultralytics import YOLOWorld
+            hazard_model = YOLOWorld("yolov8s-worldv2.pt")
+            hazard_model.set_classes(list(wanted_hazards))
+            print("[AUTO HAZARD] Open-vocabulary model; labels:", wanted_hazards)
+        print("[AUTO HAZARD] Automatic recognition enabled; no ROI/T key needed.")
+        print("[AUTO HAZARD] Detection is experimental; NEVER rely on it for safety.")
 
     editor = ZoneEditor(zone_file)
     road_editor = ZoneEditor(road_file)
@@ -101,12 +134,6 @@ def run(port, preview_only=False, no_api=False, dwell=8.0, weights="yolov8n.pt",
     if uno_q is not None:
         print("[UNO Q] Mirroring Nicla warnings to", uno_q.base_url)
 
-
-        # Moving danger zone tracking
-    object_tracker = None #will store the tool that will track the danger object 
-    tracked_box = None #stores the tracked box 
-    tracking_active = False #tells us whether camera is tracking an object, default set to none
-    tracking_margin = 30 
 
     #function runs when you interact with camera window with mous e
     def on_mouse(event, x, y, flags, userdata):
@@ -216,36 +243,57 @@ def run(port, preview_only=False, no_api=False, dwell=8.0, weights="yolov8n.pt",
 
 
 
-                        if tracking_active:  #if tracking active 
-                            success, tracked_box = object_tracker.update(frame) #tells openCV to get the tracked object, returns whether it worked, and the objects new position 
-
-                            if not success:
-                                tracking_active = False
-                                object_tracker = None
-                                tracked_box = None
-                                print("Lost object tracking")
-
-
-
-                        if tracking_active: #if you are tracking soemthing 
-                            x, y, w, h = map(int, tracked_box) #get objects positons and cooridnates 
-
-                            x1 = max(0, x - tracking_margin) #calculate the danger zone around object 
-                            y1 = max(0, y - tracking_margin)
-
-                            x2 = min(width - 1, x + w + tracking_margin)
-                            y2 = min(height - 1, y + h + tracking_margin)
-
-                            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 2) #the danger zone rectangle 
-
-
-
                         frame_size[:] = [width, height]
                         regions = editor.pixels(width, height)
                         road_regions = road_editor.pixels(width, height)
                         inference_frame = frame.copy()
                         now = time.monotonic()
                         events = []
+
+                        # Recognise danger objects automatically in every frame.
+                        # ByteTrack assigns IDs so boxes follow moving detected objects.
+                        if hazard_model is not None:
+                            hazard_result = hazard_model.track(
+                                inference_frame, persist=True, tracker="bytetrack.yaml",
+                                conf=hazard_confidence, verbose=False,
+                            )[0]
+                            hazard_boxes = hazard_result.boxes
+                            matches = []
+                            if hazard_boxes is not None:
+                                xyxy = hazard_boxes.xyxy.cpu().numpy()
+                                kinds = hazard_boxes.cls.cpu().numpy()
+                                scores = hazard_boxes.conf.cpu().numpy()
+                                ids = (hazard_boxes.id.cpu().numpy()
+                                       if hazard_boxes.id is not None
+                                       else [None] * len(xyxy))
+                                matches = find_hazards(
+                                    hazard_model.names,
+                                    zip(kinds, scores, xyxy, ids),
+                                    wanted_hazards, hazard_confidence,
+                                )
+                            new_episode = hazard_monitor.update(matches)
+                            for hit in matches:
+                                x1, y1, x2, y2 = hit.box
+                                cv2.rectangle(frame, (x1, y1), (x2, y2),
+                                              (0, 0, 255), 2)
+                                suffix = f" #{hit.track_id}" if hit.track_id is not None else ""
+                                cv2.putText(
+                                    frame, f"SHARP OBJECT {hit.label}{suffix} {hit.confidence:.2f}",
+                                    (x1, max(18, y1 - 5)),
+                                    cv2.FONT_HERSHEY_SIMPLEX, .42, (0, 0, 255), 1,
+                                )
+                            if new_episode:
+                                primary = max(matches, key=lambda x: x.confidence)
+                                events.append((
+                                    "sharp_object_detected", "nicla-camera-view", "warning",
+                                    {"object_label": primary.label,
+                                     "confidence": round(primary.confidence, 3),
+                                     "track_id": primary.track_id,
+                                     "detection_mode": ("custom_weights" if hazard_weights
+                                                        else "yolo_world_zero_shot"),
+                                     "automatically_detected": True,
+                                     "not_safety_certified": True},
+                                ))
 
                         # Track people and cars only when predictive mode is enabled.
                         # Standard person-only detection is unchanged by default.
@@ -379,7 +427,9 @@ def run(port, preview_only=False, no_api=False, dwell=8.0, weights="yolov8n.pt",
                         ppe_alert = any(state.inside for state in ppe_states.values())
                         tof_alert = proximity.near if proximity is not None else False
                         predicted_alert = bool(predictor.active) if predictor else False
-                        should_warn = in_zone or ppe_alert or tof_alert or predicted_alert
+                        sharp_object_alert = hazard_monitor.active if hazard_monitor else False
+                        should_warn = (in_zone or ppe_alert or tof_alert
+                                       or predicted_alert or sharp_object_alert)
                         analysis_finished_at = time.perf_counter()
                         if uno_q is not None:
                             # Nonblocking: latest state wins; periodic sync survives UNO Q restarts.
@@ -551,15 +601,6 @@ def run(port, preview_only=False, no_api=False, dwell=8.0, weights="yolov8n.pt",
                             running = False
                             break
 
-                        if key in (ord("t"), ord("T")):#requests a tracking object when t is pressed
-                            tracked_box = cv2.selectROI(window, frame, False, False)
-
-                            if tracked_box[2] > 0 and tracked_box[3] > 0: #checks that you selected something 
-                                object_tracker = cv2.TrackerCSRT_create()
-                                object_tracker.init(frame, tracked_box)#creates a new tracking object with the new frame and tracked box 
-                                tracking_active = True #records state of tracking 
-                                print("Object selected:", tracked_box)
-
                         if key in (ord("e"), ord("E")):
                             road_editor.cancel()
                             active_editor = editor
@@ -617,6 +658,12 @@ def run(port, preview_only=False, no_api=False, dwell=8.0, weights="yolov8n.pt",
                 if uno_q is not None:
                     uno_q.set_state(False)
                 warning_active = False
+                if hazard_monitor is not None:
+                    hazard_monitor.reset()
+                    # Do not reuse tracker IDs across separate camera connections.
+                    if hazard_model is not None and getattr(hazard_model, "predictor", None):
+                        for tracker in getattr(hazard_model.predictor, "trackers", []):
+                            tracker.reset()
                 occupancies = [DebouncedOccupancy(2) for _ in editor.zones]
                 monitors = [ZoneMonitor(dwell_seconds=dwell) for _ in editor.zones]
                 ppe_states = {kind: DebouncedOccupancy(2) for kind in PPE_HAZARDS}
@@ -677,6 +724,14 @@ def main():
                         help="Optional UNO Q App Lab URL via ADB: http://127.0.0.1:7000")
     parser.add_argument("--profile-latency", action="store_true",
                         help="Log slow frames by stage (USB, detection, LED, reporting, preview)")
+    parser.add_argument("--auto-hazards", action="store_true",
+                        help="Automatically recognise/track sharp objects (experimental YOLO-World)")
+    parser.add_argument("--hazard-weights",
+                        help="Optional custom YOLO weights trained explicitly on requested hazard labels")
+    parser.add_argument("--hazard-labels", default="knife",
+                        help="Comma-separated detection classes, e.g. knife,scissors,saw")
+    parser.add_argument("--hazard-confidence", type=float, default=0.45,
+                        help="Minimum sharp-object model confidence (0 to 1)")
     args = parser.parse_args()
     try:
         run(args.port, args.preview_only, args.no_api, args.dwell, args.weights,
@@ -684,7 +739,8 @@ def main():
             args.record, args.retry_seconds, args.predictive, args.sharp_zone,
             args.motion_debug, args.road_file, args.road_filter,
             args.stream_port, args.stream_host, args.uno_q_url,
-            args.profile_latency)
+            args.profile_latency, args.auto_hazards, args.hazard_weights,
+            args.hazard_labels, args.hazard_confidence)
     except KeyboardInterrupt:
         print("[EXIT] Interrupted by user")
 
