@@ -19,6 +19,7 @@ from uuid import uuid4
 from .auto_hazards import HazardMonitor, find_hazards, parse_labels
 from .async_events import AsyncEventReporter
 from .camera_controls import clear_saved_camera_boxes
+from .manual_tracking import create_manual_tracker, update_manual_trackers
 from .nicla_extra_rules import (
     PPE_HAZARDS, ProximityAlert, extract_ppe_hazards, supported_ppe_classes,
 )
@@ -135,7 +136,7 @@ def run(port, preview_only=False, no_api=False, dwell=8.0, weights="yolov8n.pt",
         print("[UNO Q] Mirroring Nicla warnings to", uno_q.base_url)
 
 
-        # Moving danger zone tracking
+    # Operator-selected object tracking (T adds a box; B removes all boxes).
     trackers = []
     tracking_margin = 30
 
@@ -168,7 +169,7 @@ def run(port, preview_only=False, no_api=False, dwell=8.0, weights="yolov8n.pt",
 
     print("Opening Nicla Vision:", port, "| close OpenMV IDE first")
     print("Keys: E danger zone, L road zone, left-click corners, S save, U undo, C cancel,")
-    print("R clear danger zones, K clear road zones, Q quit.")
+    print("R clear danger zones, K clear road zones, T add tracker, B clear trackers, Q quit.")
     print("Loaded", len(editor.zones), "danger zones from", editor.path)
     print("[ROAD] Loaded", len(road_editor.zones), "vehicle conflict areas from",
           road_editor.path)
@@ -227,9 +228,7 @@ def run(port, preview_only=False, no_api=False, dwell=8.0, weights="yolov8n.pt",
                                     except OSError as exc:
                                         print("[BOX RESET] Could not remove saved zones:", exc)
                                         continue
-                                    object_tracker = None
-                                    tracked_box = None
-                                    tracking_active = False
+                                    trackers.clear()
                                     active_editor = editor
                                     sharp_zone_ids.clear()  # Old marked-sharp zone IDs no longer exist.
                                     preview.hub.set_boxes_visible(False)
@@ -247,39 +246,28 @@ def run(port, preview_only=False, no_api=False, dwell=8.0, weights="yolov8n.pt",
 
 
 
-                    active_trackers = []
-
-                    for tracker in trackers:
-                        success, tracked_box = tracker.update(frame)
-
-                        if success:
-                            x, y, w, h = map(int, tracked_box)
-
-                            x1 = max(0, x - tracking_margin)
-                            y1 = max(0, y - tracking_margin)
-                            x2 = min(width - 1, x + w + tracking_margin)
-                            y2 = min(height - 1, y + h + tracking_margin)
-
-                            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 2)
-
-                            active_trackers.append(tracker)
-
-                        else:
-                            print("Lost tracking for one object")
-
-                        trackers = active_trackers
-
-
-
-                     
-
-
                         frame_size[:] = [width, height]
                         regions = editor.pixels(width, height)
                         road_regions = road_editor.pixels(width, height)
                         inference_frame = frame.copy()
                         now = time.monotonic()
                         events = []
+
+                        # Track every operator-selected box on every frame, and
+                        # do not draw boxes on input sent to the AI models.
+                        manual_boxes, lost_count = update_manual_trackers(
+                            trackers, inference_frame
+                        )
+                        for x, y, w, h in manual_boxes:
+                            x1 = max(0, x - tracking_margin)
+                            y1 = max(0, y - tracking_margin)
+                            x2 = min(width - 1, x + w + tracking_margin)
+                            y2 = min(height - 1, y + h + tracking_margin)
+                            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 2)
+                        if lost_count:
+                            print("[TRACK] Lost", lost_count,
+                                  "object(s); active:", len(trackers))
+
 
                         # Recognise danger objects automatically in every frame.
                         # ByteTrack assigns IDs so boxes follow moving detected objects.
@@ -632,18 +620,24 @@ def run(port, preview_only=False, no_api=False, dwell=8.0, weights="yolov8n.pt",
                             running = False
                             break
                         if key in (ord("t"), ord("T")):
-                            tracked_box = cv2.selectROI(window, frame, False, False)
-
-                            if tracked_box[2] > 0 and tracked_box[3] > 0:
-                                tracker = cv2.legacy.TrackerCSRT_create()
-                                tracker.init(frame, tracked_box)
-                                trackers.append(tracker)
-                                print("Total objects:", len(trackers))
-
+                            # Selecting an ROI temporarily pauses the video.
+                            # Press Enter to accept a box or Escape to cancel.
+                            selected = cv2.selectROI(window, frame, False, False)
+                            if selected[2] > 0 and selected[3] > 0:
+                                try:
+                                    tracker = create_manual_tracker(cv2)
+                                    initialized = tracker.init(inference_frame, selected)
+                                    if initialized is False:
+                                        print("[TRACK] Could not initialise the selected box")
+                                    else:
+                                        trackers.append(tracker)
+                                        print("[TRACK] Objects tracked:", len(trackers))
+                                except (RuntimeError, cv2.error) as exc:
+                                    print("[TRACK] Could not add selected object:", exc)
                         if key in (ord("b"), ord("B")):
-                             trackers.clear()
-                             print("All trackers reset!")
-                                                            
+                            trackers.clear()
+                            print("[TRACK] All manually selected objects cleared.")
+
 
                         if key in (ord("e"), ord("E")):
                             road_editor.cancel()
@@ -702,6 +696,7 @@ def run(port, preview_only=False, no_api=False, dwell=8.0, weights="yolov8n.pt",
                 if uno_q is not None:
                     uno_q.set_state(False)
                 warning_active = False
+                trackers.clear()  # Stale boxes cannot follow a new camera session.
                 if hazard_monitor is not None:
                     hazard_monitor.reset()
                     # Do not reuse tracker IDs across separate camera connections.
