@@ -5,17 +5,20 @@ Run TEMPORARILY from OpenMV IDE first; do NOT save as /flash/main.py.
 If flashed as main.py, it replaces USB command handling until restored.
 The Linux/UNO Q consumer and inference still require integration/testing.
 
-For first test, create sg_wifi.py on the Nicla filesystem with:
-    WIFI_SSID = "your-private-2.4-ghz-ssid"
-    WIFI_PASSWORD = "your-password"
-Do NOT commit credentials or expose port 8080 to the Internet.
+For a temporary OpenMV test, edit the placeholders below LOCALLY in the IDE.
+Do NOT commit real Wi-Fi credentials or expose port 8080 to the Internet.
 """
 import network
 import csi
 import socket
 import time
 
-from sg_wifi import WIFI_SSID, WIFI_PASSWORD
+# Edit these two lines LOCALLY in OpenMV IDE. Do not commit the changes.
+WIFI_SSID = "YOUR_PRIVATE_2_4_GHZ_WIFI"
+WIFI_PASSWORD = "YOUR_PRIVATE_WIFI_PASSWORD"
+
+if WIFI_SSID.startswith("YOUR_") or WIFI_PASSWORD.startswith("YOUR_"):
+    raise ValueError("Set the Wi-Fi SSID and password locally in OpenMV IDE.")
 
 PORT = 8080
 JPEG_QUALITY = 48
@@ -47,6 +50,7 @@ print("MJPEG camera ready at http://%s:%d/stream.mjpg" %
 while True:
     client, address = server.accept()
     try:
+        client.settimeout(6.0)
         request = client.recv(1024)
         if not (b"GET /stream.mjpg " in request or b"GET / " in request):
             client.sendall(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n")
