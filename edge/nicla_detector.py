@@ -100,10 +100,8 @@ def run(port, preview_only=False, no_api=False, dwell=8.0, weights="yolov8n.pt",
 
 
         # Moving danger zone tracking
-    object_tracker = None #will store the tool that will track the danger object 
-    tracked_box = None #stores the tracked box 
-    tracking_active = False #tells us whether camera is tracking an object, default set to none
-    tracking_margin = 30 
+    trackers = []
+    tracking_margin = 30
 
     #function runs when you interact with camera window with mous e
     def on_mouse(event, x, y, flags, userdata):
@@ -186,28 +184,31 @@ def run(port, preview_only=False, no_api=False, dwell=8.0, weights="yolov8n.pt",
 
 
 
-                        if tracking_active:  #if tracking active 
-                            success, tracked_box = object_tracker.update(frame) #tells openCV to get the tracked object, returns whether it worked, and the objects new position 
+                    active_trackers = []
 
-                            if not success:
-                                tracking_active = False
-                                object_tracker = None
-                                tracked_box = None
-                                print("Lost object tracking")
+                    for tracker in trackers:
+                        success, tracked_box = tracker.update(frame)
 
+                        if success:
+                            x, y, w, h = map(int, tracked_box)
 
-
-                        if tracking_active: #if you are tracking soemthing 
-                            x, y, w, h = map(int, tracked_box) #get objects positons and cooridnates 
-
-                            x1 = max(0, x - tracking_margin) #calculate the danger zone around object 
+                            x1 = max(0, x - tracking_margin)
                             y1 = max(0, y - tracking_margin)
-
                             x2 = min(width - 1, x + w + tracking_margin)
                             y2 = min(height - 1, y + h + tracking_margin)
 
-                            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 2) #the danger zone rectangle 
+                            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 2)
 
+                            active_trackers.append(tracker)
+
+                        else:
+                            print("Lost tracking for one object")
+
+                        trackers = active_trackers
+
+
+
+                     
 
 
                         frame_size[:] = [width, height]
@@ -481,16 +482,19 @@ def run(port, preview_only=False, no_api=False, dwell=8.0, weights="yolov8n.pt",
                         if key in (ord("q"), ord("Q")):
                             running = False
                             break
-
-                        if key in (ord("t"), ord("T")):#requests a tracking object when t is pressed
+                        if key in (ord("t"), ord("T")):
                             tracked_box = cv2.selectROI(window, frame, False, False)
 
-                            if tracked_box[2] > 0 and tracked_box[3] > 0: #checks that you selected something 
-                                object_tracker = cv2.TrackerCSRT_create()
-                                object_tracker.init(frame, tracked_box)#creates a new tracking object with the new frame and tracked box 
-                                tracking_active = True #records state of tracking 
-                                print("Object selected:", tracked_box)
+                            if tracked_box[2] > 0 and tracked_box[3] > 0:
+                                tracker = cv2.legacy.TrackerCSRT_create()
+                                tracker.init(frame, tracked_box)
+                                trackers.append(tracker)
+                                print("Total objects:", len(trackers))
 
+                                if key in (ord("b"), ord("B")):
+                                    trackers.clear()
+                                    print("All trackers reset!")
+                                                            
                         if key in (ord("e"), ord("E")):
                             road_editor.cancel()
                             active_editor = editor
