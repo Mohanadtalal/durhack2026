@@ -21,7 +21,7 @@ if WIFI_SSID.startswith("YOUR_") or WIFI_PASSWORD.startswith("YOUR_"):
     raise ValueError("Set the Wi-Fi SSID and password locally in OpenMV IDE.")
 
 PORT = 8080
-JPEG_QUALITY = 48
+JPEG_QUALITY = 35
 
 cam = csi.CSI()
 cam.reset()
