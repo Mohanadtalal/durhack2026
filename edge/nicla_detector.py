@@ -200,6 +200,7 @@ def run(port, preview_only=False, no_api=False, dwell=8.0, weights="yolov8n.pt",
                                     tracked_box = None
                                     tracking_active = False
                                     active_editor = editor
+                                    sharp_zone_ids.clear()  # Old marked-sharp zone IDs no longer exist.
                                     preview.hub.set_boxes_visible(False)
                                     print("[BOX RESET] Saved zones and manual box cleared. "
                                           "Detection and warning rules still running.")
