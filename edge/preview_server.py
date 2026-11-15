@@ -12,6 +12,7 @@ GET /status.json   whether a new frame arrived within five seconds, plus
 import json
 import threading
 import time
+from queue import Empty, SimpleQueue
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
 
@@ -40,6 +41,8 @@ class FrameHub:
         self.last_frame = None
         self.zones = []
         self.closed = False
+        self._controls = SimpleQueue()
+        self._boxes_visible = True
 
     def publish(self, jpeg):
         if not jpeg or not isinstance(jpeg, bytes) or len(jpeg) > 2_000_000:
@@ -63,12 +66,35 @@ class FrameHub:
                 "connected": age is not None and age < FRAME_STALE_AFTER,
                 "last_frame_age_seconds": None if age is None else round(age, 1),
                 "zones": list(self.zones),
+                "boxes_visible": self._boxes_visible,
                 "prototype": True,
             }
 
     def snapshot(self):
         with self.condition:
             return self.jpeg, self.last_frame
+
+    def send_control(self, action):
+        if action not in {"reset-boxes", "show-boxes"}:
+            raise ValueError("Unsupported camera control")
+        self._controls.put(action)
+
+    def take_controls(self):
+        actions = []
+        while True:
+            try:
+                actions.append(self._controls.get_nowait())
+            except Empty:
+                break
+        return actions
+
+    def set_boxes_visible(self, visible):
+        with self.condition:
+            self._boxes_visible = bool(visible)
+
+    def boxes_visible(self):
+        with self.condition:
+            return self._boxes_visible
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -89,6 +115,40 @@ class _Handler(BaseHTTPRequestHandler):
         if length is not None:
             self.send_header("Content-Length", str(length))
         self.end_headers()
+
+    def do_OPTIONS(self):
+        path = urlsplit(self.path).path
+        origin = self.headers.get("Origin")
+        if (path not in {"/controls/reset-boxes", "/controls/show-boxes"}
+                or origin not in ALLOWED_ORIGINS):
+            self._head(403, "text/plain; charset=utf-8", 0)
+            return
+        self.send_response(204)
+        self._cors()
+        self.send_header("Access-Control-Allow-Methods", "POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "X-SiteGuardian-Control")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def do_POST(self):
+        path = urlsplit(self.path).path
+        controls = {"/controls/reset-boxes": "reset-boxes",
+                    "/controls/show-boxes": "show-boxes"}
+        action = controls.get(path)
+        origin = self.headers.get("Origin")
+        # No remote control on a network-visible, unauthenticated preview.
+        server_is_local = self.server.server_address[0] in ("127.0.0.1", "::1", "localhost")
+        request_is_local = self.client_address[0] in ("127.0.0.1", "::1")
+        if (action is None or not server_is_local or not request_is_local
+                or (origin is not None and origin not in ALLOWED_ORIGINS)
+                or self.headers.get("X-SiteGuardian-Control") != action
+                or self.headers.get("Content-Length", "0") not in ("", "0")):
+            self._head(403, "text/plain; charset=utf-8", 0)
+            return
+        self.server.frame_hub.send_control(action)
+        body = json.dumps({"queued": True, "action": action}).encode("utf-8")
+        self._head(202, "application/json; charset=utf-8", len(body))
+        self.wfile.write(body)
 
     def do_GET(self):
         path = urlsplit(self.path).path
@@ -172,6 +232,9 @@ class PreviewServer:
 
     def update_zones(self, zones):
         self.hub.update_zones(zones)
+
+    def take_controls(self):
+        return self.hub.take_controls()
 
     def close(self):
         with self.hub.condition:

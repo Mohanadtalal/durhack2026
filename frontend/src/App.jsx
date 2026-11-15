@@ -8,7 +8,7 @@ import { CountUp, Panel } from './components/Common'
 import { StatusHero } from './components/StatusHero'
 import { SiteMap, zoneSummaries } from './components/SiteMap'
 import { HazardBreakdown, SeverityBreakdown, Trend, ZoneBreakdown } from './components/Charts'
-import { Filters, IncidentDetail, IncidentList, Timeline } from './components/Incidents'
+import { Filters, IncidentDetail, IncidentList, SnapshotGallery, Timeline } from './components/Incidents'
 import { InsightPanel } from './components/Insights'
 import { Toasts } from './components/Toasts'
 import { CameraFeed } from './components/CameraFeed'
@@ -129,17 +129,45 @@ export default function App() {
         {view === 'overview' && <StatusHero events={events} now={now} />}
 
         {view === 'overview' && (<>
-          <div className="grid two">
-            <Panel tone="blue" title="Camera zones" note="Actual saved camera regions when connected; unmapped incidents remain listed.">
-              <SiteMap events={events} now={now} selectedZone={filters.zone} onSelectZone={selectZone} cameraStatus={cameraStatus} />
+          <div className="dashboard-priority">
+            <div><span className="dashboard-kicker">SITE MONITORING</span>
+              <h2>Control centre</h2><p>See the live camera, act on new alerts and review saved evidence.</p>
+            </div>
+            <div className="dashboard-live-status">
+              <span className={'dashboard-pill ' + (cameraStatus?.connected ? 'online' : 'offline')}>
+                <span className="live-dot" /> Camera {cameraStatus?.connected ? 'receiving frames' : 'offline'}
+              </span>
+              <span className={'dashboard-pill ' + (health ? 'online' : 'offline')}>
+                <span className="live-dot" /> API {health ? 'connected' : 'unavailable'}
+              </span>
+            </div>
+          </div>
+          <div className="grid cam dashboard-primary-grid">
+            <Panel tone="teal" title="Live camera" note="Visual monitoring from the connected Nicla Vision">
+              <CameraFeed latest={events[0]} now={now} cameraStatus={cameraStatus} cameraError={cameraError} />
             </Panel>
-            <Panel tone="violet" title="Latest incidents" note="Newest first. Click one for the full story." action={<button className="icon-btn" onClick={refresh} aria-label="Refresh now"><RefreshCcw size={17} /></button>}>
-              <div className="scroll tall"><IncidentList incidents={filtered.slice(0, 6)} now={now} onOpen={setSelected} /></div>
+            <Panel tone="violet" title="Recent alerts" note="Select any alert to review its image and incident details"
+              action={<button className="icon-btn" onClick={refresh} aria-label="Refresh alerts"><RefreshCcw size={17} /></button>}>
+              <div className="scroll tall"><IncidentList incidents={events.slice(0, 8)} now={now} onOpen={setSelected} /></div>
+              <button className="dashboard-inline-action" onClick={() => go('history')}>See full incident history →</button>
             </Panel>
           </div>
-          <div className="grid cam">
-            <Panel tone="teal" title="Camera" note="What the camera on site sees"><CameraFeed latest={events[0]} now={now} cameraStatus={cameraStatus} cameraError={cameraError} /></Panel>
-            <Panel tone="pink" title="AI pattern review" note="Gemini looks for problems that keep repeating"><div className="scroll tall">{insightPanel}</div></Panel>
+          <div className="grid two dashboard-secondary-grid">
+            <Panel tone="pink" title="AI safety briefing" note="Concise recommendations based only on recorded incidents">
+              {insightPanel}
+            </Panel>
+            <Panel tone="blue" title="Alert snapshots" note="Evidence stored when a camera detection is reported"
+              action={<button className="dashboard-inline-action" onClick={() => go('history')}>All alerts</button>}>
+              <SnapshotGallery incidents={events} onOpen={setSelected} />
+            </Panel>
+          </div>
+          <div className="grid two">
+            <Panel tone="blue" title="Camera zones" note="Saved camera regions; unmapped incidents are shown separately">
+              <SiteMap events={events} now={now} selectedZone={filters.zone} onSelectZone={selectZone} cameraStatus={cameraStatus} />
+            </Panel>
+            <Panel title="Incidents by area" note="Areas with the most reports">
+              <ZoneBreakdown events={events} />
+            </Panel>
           </div>
           <details className="sim">
             <summary>Try it: make a practice alert</summary>
