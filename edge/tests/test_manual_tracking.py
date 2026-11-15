@@ -74,8 +74,10 @@ def test_camera_loop_processes_frames_even_with_zero_manual_trackers():
         return any(isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
                    and n.func.attr == method for stmt in loop.body for n in ast.walk(stmt))
     frame_loops = [loop for loop in loops if includes_call(loop, "snapshot_gray")]
-    assert len(frame_loops) == 1
-    loop = frame_loops[0]
+    assert frame_loops
+    # The outer reconnect loop also contains nested calls; choose the
+    # innermost frame-capture loop, where every frame must be processed.
+    loop = min(frame_loops, key=lambda node: node.end_lineno - node.lineno)
     assert includes_call(loop, "update_manual_trackers")
     assert includes_call(loop, "imshow")
     assert includes_call(loop, "selectROI")
