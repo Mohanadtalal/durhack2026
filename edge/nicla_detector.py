@@ -196,7 +196,7 @@ def run(port, preview_only=False, no_api=False, dwell=8.0, weights="yolov8n.pt",
                             x2 = min(width - 1, x + w + tracking_margin)
                             y2 = min(height - 1, y + h + tracking_margin)
 
-                            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 2). #the danger zone rectangle 
+                            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 2) #the danger zone rectangle 
 
 
 
