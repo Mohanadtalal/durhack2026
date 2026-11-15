@@ -90,6 +90,10 @@ def run(port, preview_only=False, no_api=False, dwell=8.0, weights="yolov8n.pt",
     running = True #controls camera loop continution 
     preview = None # variable holds the streaming server 
 
+    uno_q = UnoQWarning(uno_q_url) if uno_q_url else None
+    if uno_q is not None:
+        print("[UNO Q] Mirroring Nicla warnings to", uno_q.base_url)
+
 
         # Moving danger zone tracking
     object_tracker = None #will store the tool that will track the danger object 
