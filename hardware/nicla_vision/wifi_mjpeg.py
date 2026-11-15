@@ -1,16 +1,17 @@
 """Nicla Vision OpenMV firmware: RGB MJPEG video over private 2.4 GHz Wi-Fi.
 
-This is an ALTERNATIVE to the current SiteGuardian USB 'raw0' main.py:
-flashing this script replaces USB command handling. The Linux/UNO Q consumer
-and on-device inference still need hardware integration and benchmarking.
+This is an ALTERNATIVE to the current SiteGuardian USB 'raw0' main.py.
+Run TEMPORARILY from OpenMV IDE first; do NOT save as /flash/main.py.
+If flashed as main.py, it replaces USB command handling until restored.
+The Linux/UNO Q consumer and inference still require integration/testing.
 
-On the Nicla filesystem create sg_wifi.py with:
+For first test, create sg_wifi.py on the Nicla filesystem with:
     WIFI_SSID = "your-private-2.4-ghz-ssid"
     WIFI_PASSWORD = "your-password"
-Do NOT commit that file or expose port 8080 to the Internet.
+Do NOT commit credentials or expose port 8080 to the Internet.
 """
 import network
-import sensor
+import csi
 import socket
 import time
 
@@ -19,12 +20,14 @@ from sg_wifi import WIFI_SSID, WIFI_PASSWORD
 PORT = 8080
 JPEG_QUALITY = 48
 
-sensor.reset()
-sensor.set_pixformat(sensor.RGB565)  # More suitable for recognising small knives.
-sensor.set_framesize(sensor.QVGA)
-sensor.skip_frames(time=1500)
+cam = csi.CSI()
+cam.reset()
+cam.pixformat(csi.RGB565)  # Keep color detail for small-object recognition.
+cam.framesize(csi.QVGA)
+cam.framebuffers(1)
+cam.snapshot(time=1500)
 
-wifi = network.WLAN(network.STA_IF)
+wifi = network.WLAN(network.WLAN.IF_STA)
 wifi.active(True)
 wifi.connect(WIFI_SSID, WIFI_PASSWORD)
 deadline = time.ticks_add(time.ticks_ms(), 30000)
@@ -55,7 +58,7 @@ while True:
             b"Connection: close\r\n\r\n"
         )
         while wifi.isconnected():
-            jpeg = sensor.snapshot().compressed(quality=JPEG_QUALITY)
+            jpeg = cam.snapshot().to_jpeg(quality=JPEG_QUALITY, copy=True)
             client.sendall(
                 ("--frame\r\n"
                  "Content-Type: image/jpeg\r\n"
