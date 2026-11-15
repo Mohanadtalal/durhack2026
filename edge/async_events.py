@@ -10,6 +10,7 @@ prototype monitoring software, not a certified incident recorder.
 """
 import queue
 import threading
+import time
 
 from .client import flush_pending, send_event
 
@@ -52,14 +53,16 @@ class AsyncEventReporter:
     def _work(self):
         # All queue file and HTTP operations happen on this single thread.
         self._flush()
+        next_retry = time.monotonic() + self._retry_seconds
         while True:
             if self._closed and self._pending.empty():
                 return
             try:
-                event, image = self._pending.get(timeout=min(0.25, self._retry_seconds))
+                event, image = self._pending.get(timeout=0.25)
             except queue.Empty:
-                if not self._closed:
+                if not self._closed and time.monotonic() >= next_retry:
                     self._flush()
+                    next_retry = time.monotonic() + self._retry_seconds
                 continue
             try:
                 self._sender(event, snapshot_jpeg=image)
