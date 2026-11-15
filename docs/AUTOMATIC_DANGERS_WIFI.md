@@ -68,14 +68,20 @@ integrated with the existing `NiclaUSB` detector or tested on this board.
 1. Configure both devices on the same **private, secured 2.4-GHz network**
    with LAN client-to-client traffic enabled. Managed campus Wi-Fi may block
    device-to-device access.
-2. On the Nicla's OpenMV filesystem, create a separate `sg_wifi.py`:
-   ```python
-   WIFI_SSID = "YOUR_PRIVATE_WIFI_SSID"
-   WIFI_PASSWORD = "YOUR_PRIVATE_WIFI_PASSWORD"
-   ```
-   **Never add this credential file to Git or send it to anyone.**
-3. Upload or run `hardware/nicla_vision/wifi_mjpeg.py` with OpenMV IDE.
-   The Nicla prints an address like `192.168.4.20`.
+2. In OpenMV IDE, connect Nicla Vision over USB and **Stop** any
+   running script. Open `hardware/nicla_vision/wifi_mjpeg.py` (from this
+   branch), fill in the two `WIFI_SSID` / `WIFI_PASSWORD` placeholders
+   in the editor on your own laptop. **Never put your real credentials
+   in Git, screenshots, or chat.**
+3. Click **Run** to test the script *temporarily*. **Do not click
+   "Save to OpenMV Cam" or name it `main.py`** at this stage. This is
+   only a runtime test; power-cycling the Nicla restores the existing
+   `/flash/main.py` USB firmware. The Nicla prints its private IPv4
+   address and `MJPEG camera ready at .../stream.mjpg`.
+   The sketch uses OpenMV v5 `csi.CSI` and `to_jpeg`; JPEG streaming
+   on this Nicla still needs a hardware test and may fail if memory or
+   encoding is unavailable. If so, note the full console error and
+   restore the original firmware before proceeding.
 4. On the same private Wi-Fi, open
    `http://<NICLA_IP>:8080/stream.mjpg` in a browser to test video.
 5. Confirm the **UNO Q** (not only the laptop) can receive a real JPEG
