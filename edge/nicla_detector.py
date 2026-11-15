@@ -110,7 +110,7 @@ def run(port, preview_only=False, no_api=False, dwell=8.0, weights="yolov8n.pt",
         if event == cv2.EVENT_LBUTTONDOWN:
             active_editor.add_corner(x, y, frame_size[0], frame_size[1])
 
-    def report(hazard_type, zone_id, severity="warning", metadata=None):
+    def report(hazard_type, zone_id, severity="warning", metadata=None, snapshot_jpeg=None):
         print("[HAZARD]", hazard_type, "|", zone_id)
         if no_api:
             return
@@ -128,7 +128,7 @@ def run(port, preview_only=False, no_api=False, dwell=8.0, weights="yolov8n.pt",
                 "safety_certified": False,
                 **(metadata or {}),
             },
-        })
+        }, snapshot_jpeg=snapshot_jpeg)
 
     print("Opening Nicla Vision:", port, "| close OpenMV IDE first")
     print("Keys: E danger zone, L road zone, left-click corners, S save, U undo, C cancel,")
@@ -358,8 +358,21 @@ def run(port, preview_only=False, no_api=False, dwell=8.0, weights="yolov8n.pt",
                             warning_active = should_warn
                             print("[LOCAL LED]", "RED - hazard present" if should_warn else "OFF - clear")
 
+                        # Capture the *same* camera frame that caused the alert.
+                        # Encode once even if multiple incident rules fire together.
+                        evidence_jpg = None
+                        if events and not no_api:
+                            ok, encoded = cv2.imencode(
+                                ".jpg", inference_frame,
+                                [int(cv2.IMWRITE_JPEG_QUALITY), 82]
+                            )
+                            if ok:
+                                evidence_jpg = encoded.tobytes()
+                            else:
+                                print("[EVIDENCE] Could not encode alert frame")
                         for event_type, zone_id, severity, metadata in events:
-                            report(event_type, zone_id, severity, metadata)
+                            report(event_type, zone_id, severity, metadata,
+                                   snapshot_jpeg=evidence_jpg)
 
                         # Magenta road/crossing regions are separate from
                         # danger zones; they don't trigger ordinary zone alerts.
