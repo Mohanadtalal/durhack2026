@@ -87,14 +87,25 @@ def run(port, preview_only=False, no_api=False, dwell=8.0, weights="yolov8n.pt",
     nframes = 0
     t0 = time.monotonic()
     last_motion_debug_log = 0.0
-    window = "SiteGuardian: Nicla Vision"
+    window = "SiteGuardian: Nicla Vision" #name of camera window that appears on screen 
     frame_size = [320, 240]
-    running = True
-    preview = None
+
+
+    running = True #controls camera loop continution 
+    preview = None # variable holds the streaming server 
+
     uno_q = UnoQWarning(uno_q_url) if uno_q_url else None
     if uno_q is not None:
         print("[UNO Q] Mirroring Nicla warnings to", uno_q.base_url)
 
+
+        # Moving danger zone tracking
+    object_tracker = None #will store the tool that will track the danger object 
+    tracked_box = None #stores the tracked box 
+    tracking_active = False #tells us whether camera is tracking an object, default set to none
+    tracking_margin = 30 
+
+    #function runs when you interact with camera window with mous e
     def on_mouse(event, x, y, flags, userdata):
         if event == cv2.EVENT_LBUTTONDOWN:
             active_editor.add_corner(x, y, frame_size[0], frame_size[1])
@@ -165,11 +176,40 @@ def run(port, preview_only=False, no_api=False, dwell=8.0, weights="yolov8n.pt",
                     warning_active = False
                     last_distance_poll = 0.0
 
+
+                    #keeps camera tracking system running
                     while running:
                         raw = nicla.snapshot_gray()
                         gray = np.frombuffer(raw, dtype=np.uint8).reshape((240, 320))
                         frame = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
                         height, width = frame.shape[:2]
+
+
+
+                        if tracking_active:  #if tracking active 
+                            success, tracked_box = object_tracker.update(frame) #tells openCV to get the tracked object, returns whether it worked, and the objects new position 
+
+                            if not success:
+                                tracking_active = False
+                                object_tracker = None
+                                tracked_box = None
+                                print("Lost object tracking")
+
+
+
+                        if tracking_active: #if you are tracking soemthing 
+                            x, y, w, h = map(int, tracked_box) #get objects positons and cooridnates 
+
+                            x1 = max(0, x - tracking_margin) #calculate the danger zone around object 
+                            y1 = max(0, y - tracking_margin)
+
+                            x2 = min(width - 1, x + w + tracking_margin)
+                            y2 = min(height - 1, y + h + tracking_margin)
+
+                            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 2) #the danger zone rectangle 
+
+
+
                         frame_size[:] = [width, height]
                         regions = editor.pixels(width, height)
                         road_regions = road_editor.pixels(width, height)
@@ -441,6 +481,16 @@ def run(port, preview_only=False, no_api=False, dwell=8.0, weights="yolov8n.pt",
                         if key in (ord("q"), ord("Q")):
                             running = False
                             break
+
+                        if key in (ord("t"), ord("T")):#requests a tracking object when t is pressed
+                            tracked_box = cv2.selectROI(window, frame, False, False)
+
+                            if tracked_box[2] > 0 and tracked_box[3] > 0: #checks that you selected something 
+                                object_tracker = cv2.TrackerCSRT_create()
+                                object_tracker.init(frame, tracked_box)#creates a new tracking object with the new frame and tracked box 
+                                tracking_active = True #records state of tracking 
+                                print("Object selected:", tracked_box)
+
                         if key in (ord("e"), ord("E")):
                             road_editor.cancel()
                             active_editor = editor
