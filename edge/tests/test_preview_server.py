@@ -2,7 +2,7 @@
 import json
 import time
 from urllib.error import HTTPError
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 
 from edge.preview_server import FrameHub, PreviewServer, zones_for_editor
 
@@ -85,3 +85,64 @@ def test_hub_rejects_unbounded_image():
         assert False
     except ValueError:
         pass
+
+
+
+def test_reset_boxes_control_is_local_confirmed_post_and_queued():
+    server = PreviewServer("127.0.0.1", 0)
+    base = "http://127.0.0.1:" + str(server.address[1])
+    try:
+        server.update_zones(zones_for_editor(FakeEditor()))
+        with urlopen(base + "/status.json", timeout=3) as r:
+            assert json.load(r)["boxes_visible"] is True
+        # GET can never delete saved zones.
+        try:
+            urlopen(base + "/controls/reset-boxes", timeout=3)
+            assert False
+        except HTTPError as exc:
+            assert exc.code == 404
+        # Simple foreign-site POSTs cannot control the camera.
+        for headers in [
+            {"Origin": "https://untrusted.example", "X-SiteGuardian-Control": "reset-boxes"},
+            {"Origin": "http://localhost:5173"},
+        ]:
+            try:
+                urlopen(Request(base + "/controls/reset-boxes", data=b"",
+                                method="POST", headers=headers), timeout=3)
+                assert False
+            except HTTPError as exc:
+                assert exc.code == 403
+        assert server.take_controls() == []
+        request = Request(base + "/controls/reset-boxes", data=b"", method="POST",
+                          headers={"Origin": "http://localhost:5173",
+                                   "X-SiteGuardian-Control": "reset-boxes"})
+        with urlopen(request, timeout=3) as resp:
+            assert resp.status == 202
+            assert json.load(resp)["queued"]
+        assert server.take_controls() == ["reset-boxes"]
+        # HTTP worker does not mutate camera-owned zone data.
+        assert len(server.hub.status()["zones"]) == 2
+        server.update_zones([])
+        server.hub.set_boxes_visible(False)
+        with urlopen(base + "/status.json", timeout=3) as resp:
+            status = json.load(resp)
+        assert status["zones"] == []
+        assert status["boxes_visible"] is False
+
+        request = Request(base + "/controls/show-boxes", data=b"", method="POST",
+                          headers={"X-SiteGuardian-Control": "show-boxes"})
+        with urlopen(request, timeout=3) as resp:
+            assert resp.status == 202
+        assert server.take_controls() == ["show-boxes"]
+
+        # Browser CORS preflight is only allowed from the dashboard origin.
+        preflight = Request(base + "/controls/reset-boxes", method="OPTIONS",
+                            headers={"Origin": "http://localhost:5173",
+                                     "Access-Control-Request-Method": "POST",
+                                     "Access-Control-Request-Headers": "x-siteguardian-control"})
+        with urlopen(preflight, timeout=3) as resp:
+            assert resp.status == 204
+            assert resp.headers["Access-Control-Allow-Origin"] == "http://localhost:5173"
+            assert "X-SiteGuardian-Control" in resp.headers["Access-Control-Allow-Headers"]
+    finally:
+        server.close()
