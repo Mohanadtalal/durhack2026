@@ -142,3 +142,27 @@ Do not expose the unauthenticated MJPEG or Web UI to a public network.
 - [ ] Fully standalone wireless assembly and wall-enclosure test.
 
 Not certified for industrial hazard detection or life-safety use.
+
+
+## Integration with the responsive dashboard (PR #14)
+
+This branch now includes `main` after PR #14. The automatic knife detector
+reports incidents through `AsyncEventReporter`, which stages and uploads a
+JPEG snapshot **before** creating the incident record. Network I/O and
+retry-queue persistence run off the video loop.
+
+Run the combined USB demo using the camera's actual COM port:
+
+```powershell
+python -m edge.nicla_detector --port COM9 --auto-hazards --hazard-labels knife --predictive --stream-port 8765 --profile-latency
+```
+
+`--auto-hazards` loads a second model and may itself slow frames, even
+though background incident delivery no longer blocks the video. The
+`--profile-latency` output splits capture, analysis, LED, event encoding,
+and preview rendering time. Test with the physical Nicla Vision; successful
+unit tests do not establish real-time performance or knife recognition.
+
+The Wi-Fi MJPEG file is an **alternative example only**, not a drop-in
+replacement for the USB command firmware. Do not flash it over
+`hardware/nicla_vision/main.py` when testing the USB detector.

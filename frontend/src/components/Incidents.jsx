@@ -1,7 +1,45 @@
-import React, { useEffect } from 'react'
-import { X, ImageOff } from 'lucide-react'
+import React, { useEffect, useState } from 'react'
+import { X, ImageOff, ExternalLink, Image as ImageIcon } from 'lucide-react'
 import { SeverityTag, SourceTag, Empty } from './Common'
 import { SEVERITY_ORDER, SEVERITY, WINDOWS, friendly, plainTitle, timeAgo } from '../config'
+
+
+function EvidenceImage({ incident, full = false }) {
+  const [failed, setFailed] = useState(false)
+  useEffect(() => setFailed(false), [incident?.snapshot])
+  const valid = Boolean(incident?.snapshot && !failed)
+  const label = failed ? 'Image unavailable' : (incident?.snapshot ? 'Loading evidence…' : 'No snapshot')
+  return (
+    <div className={full ? 'snapshot-full' : 'snapshot-thumb'}>
+      {valid
+        ? <img src={incident.snapshot}
+            alt={'Captured evidence for ' + friendly(incident.hazard_type)}
+            loading={full ? 'eager' : 'lazy'}
+            onError={() => setFailed(true)} />
+        : <span className="snapshot-placeholder"><ImageOff size={full ? 26 : 18} />
+            <small>{label}</small></span>}
+    </div>
+  )
+}
+
+export function SnapshotGallery({ incidents, onOpen }) {
+  const available = incidents.filter((incident) => incident.snapshot).slice(0, 6)
+  if (!available.length) return <Empty>No saved alert images yet. New camera detections will have snapshots once the evidence API is running.</Empty>
+  return (
+    <div className="snapshot-gallery">
+      {available.map((incident) => (
+        <button className="snapshot-gallery-card" key={incident.event_id}
+            onClick={() => onOpen(incident)}>
+          <EvidenceImage incident={incident} />
+          <span className="snapshot-gallery-text">
+            <strong>{plainTitle(incident)}</strong>
+            <small>{new Date(incident.timestamp).toLocaleString()}</small>
+          </span>
+        </button>
+      ))}
+    </div>
+  )
+}
 
 export function Filters({ filters, setFilters, events, shown }) {
   const hazards = [...new Set(events.map((e) => e.hazard_type))]
@@ -48,14 +86,19 @@ export function IncidentList({ incidents, now, onOpen, emptyText }) {
       {incidents.map((e) => (
         <li key={e.event_id}>
           <button className={'incident sev-edge-' + e.severity} onClick={() => onOpen(e)}>
-            <div className="incident-top">
-              <b>{plainTitle(e)}</b>
-              <SeverityTag severity={e.severity} />
-            </div>
-            <div className="incident-meta">
-              <span className="where">{friendly(e.zone_id)}</span>
-              <span title={new Date(e.timestamp).toLocaleString()}>{timeAgo(e.ts, now)}</span>
-              <SourceTag incident={e} />
+            <div className="incident-content">
+              <EvidenceImage incident={e} />
+              <div className="incident-copy">
+                <div className="incident-top">
+                  <b>{plainTitle(e)}</b>
+                  <SeverityTag severity={e.severity} />
+                </div>
+                <div className="incident-meta">
+                  <span className="where">{friendly(e.zone_id)}</span>
+                  <span title={new Date(e.timestamp).toLocaleString()}>{timeAgo(e.ts, now)}</span>
+                  <SourceTag incident={e} />
+                </div>
+              </div>
             </div>
           </button>
         </li>
@@ -98,11 +141,18 @@ export function IncidentDetail({ incident, onClose }) {
         </div>
         <div className="drawer-tags"><SeverityTag severity={incident.severity} /><SourceTag incident={incident} /></div>
         <p className="drawer-desc">{incident.description}</p>
-        <div className="evidence">
-          {incident.snapshot
-            ? <img src={incident.snapshot} alt={'Evidence for ' + friendly(incident.hazard_type)} />
-            : <div className="evidence-empty"><ImageOff size={22} /><span>No image evidence attached to this incident.</span><small>Evidence appears here when the edge agent includes <code>metadata.snapshot_url</code>.</small></div>}
+        <div className="snapshot-detail-head">
+          <h3><ImageIcon size={17} /> Captured evidence</h3>
+          {incident.snapshot && <a className="snapshot-open" href={incident.snapshot}
+            target="_blank" rel="noopener noreferrer">Open full image <ExternalLink size={14} /></a>}
         </div>
+        <div className="evidence"><EvidenceImage incident={incident} full /></div>
+        {!incident.snapshot && <p className="snapshot-help">
+          {md.snapshot_status === 'capture_failed' ? 'The camera could not save this frame.'
+            : md.snapshot_status === 'capture_unavailable' ? 'No frame was available when this alert occurred.'
+            : 'This older incident has no attached snapshot.'}
+        </p>}
+        <p className="snapshot-annotation">Evidence is a captured camera frame from this incident, not a live feed.</p>
         <dl className="facts">
           <dt>Time</dt><dd>{new Date(incident.timestamp).toLocaleString()}</dd>
           <dt>Source</dt><dd>{incident.source_id}</dd>
