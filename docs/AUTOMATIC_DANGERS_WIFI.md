@@ -78,9 +78,18 @@ integrated with the existing `NiclaUSB` detector or tested on this board.
    The Nicla prints an address like `192.168.4.20`.
 4. On the same private Wi-Fi, open
    `http://<NICLA_IP>:8080/stream.mjpg` in a browser to test video.
-   On the UNO Q Linux side, a TCP test to that IP and port should succeed.
-   A full UNO Q camera-stream consumer + inference runtime **still needs
-   deployment, performance measurement and testing**.
+5. Confirm the **UNO Q** (not only the laptop) can receive a real JPEG
+   frame over Wi-Fi. From Windows PowerShell, while UNO Q is attached
+   over USB for provisioning:
+   ```powershell
+   & $adb push hardware/uno_q_warning/python/check_wifi_camera.py /tmp/check_wifi_camera.py
+   & $adb shell "python3 /tmp/check_wifi_camera.py http://<NICLA_IP>:8080/stream.mjpg"
+   ```
+   Replace `<NICLA_IP>` with the Nicla's actual private-network IP address.
+   Successful output says `UNO Q RECEIVED Nicla Wi-Fi camera JPEG`.
+   This is **transport-only verification**; the UNO Q still needs a
+   deployed image decoder, lightweight detector and tracking runtime
+   before autonomous knife recognition can run without a laptop.
 
 **This firmware replaces the current USB command firmware:** do not upload
 it if you want to test the existing COM9 Nicla detector immediately. To
